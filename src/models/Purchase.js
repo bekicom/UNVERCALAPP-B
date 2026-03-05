@@ -10,6 +10,8 @@ const purchaseSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 0 },
     unit: { type: String, required: true, trim: true },
     purchasePrice: { type: Number, required: true, min: 0 },
+    priceCurrency: { type: String, enum: ["uzs", "usd"], default: "uzs" },
+    usdRateUsed: { type: Number, required: true, min: 1, default: 12171 },
     totalCost: { type: Number, required: true, min: 0 },
     paidAmount: { type: Number, required: true, min: 0, default: 0 },
     debtAmount: { type: Number, required: true, min: 0, default: 0 },

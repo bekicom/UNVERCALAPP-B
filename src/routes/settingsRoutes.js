@@ -15,6 +15,9 @@ async function getOrCreateSettings() {
   let settings = await AppSettings.findOne();
   if (!settings) {
     settings = await AppSettings.create({});
+  } else if (!Number.isFinite(Number(settings.usdRate)) || Number(settings.usdRate) <= 0) {
+    settings.usdRate = 12171;
+    await settings.save();
   }
   return settings;
 }
@@ -26,6 +29,7 @@ router.get("/", authMiddleware, async (_, res) => {
 
 router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   const lowStockThreshold = Number(req.body?.lowStockThreshold);
+  const usdRate = Number(req.body?.usdRate);
   const keyboardEnabled = Boolean(req.body?.keyboardEnabled);
   const title = String(req.body?.receipt?.title || "").trim();
   const footer = String(req.body?.receipt?.footer || "").trim();
@@ -34,9 +38,13 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   if (!Number.isFinite(lowStockThreshold) || lowStockThreshold < 0) {
     return res.status(400).json({ message: "Minimal qoldiq soni noto'g'ri" });
   }
+  if (!Number.isFinite(usdRate) || usdRate <= 0) {
+    return res.status(400).json({ message: "USD kursi noto'g'ri" });
+  }
 
   const settings = await getOrCreateSettings();
   settings.lowStockThreshold = lowStockThreshold;
+  settings.usdRate = usdRate;
   settings.keyboardEnabled = keyboardEnabled;
   settings.receipt = {
     title: title || "CHEK",

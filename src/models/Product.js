@@ -8,6 +8,8 @@ const productSchema = new mongoose.Schema(
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true },
     supplierId: { type: mongoose.Schema.Types.ObjectId, ref: "Supplier", required: true },
     purchasePrice: { type: Number, required: true, min: 0 },
+    priceCurrency: { type: String, enum: ["uzs", "usd"], default: "uzs" },
+    usdRateUsed: { type: Number, required: true, min: 1, default: 12171 },
     totalPurchaseCost: { type: Number, required: true, min: 0, default: 0 },
     retailPrice: { type: Number, required: true, min: 0 },
     wholesalePrice: { type: Number, required: true, min: 0 },

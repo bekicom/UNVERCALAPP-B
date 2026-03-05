@@ -4,18 +4,37 @@ import { Product } from "../models/Product.js";
 import { Category } from "../models/Category.js";
 import { Supplier } from "../models/Supplier.js";
 import { Purchase } from "../models/Purchase.js";
+import { AppSettings } from "../models/AppSettings.js";
 
 const router = Router();
 const PRODUCT_UNITS = ["dona", "kg", "blok", "pachka", "qop"];
 const PRICING_MODES = ["keep_old", "replace_all", "average"];
 
-function parsePayload(body) {
+function roundMoney(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+async function getUsdRate() {
+  const settings = await AppSettings.findOne().lean();
+  const rate = Number(settings?.usdRate || 0);
+  return Number.isFinite(rate) && rate > 0 ? rate : 12171;
+}
+
+function convertToUzs(value, priceCurrency, usdRate) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return NaN;
+  if (priceCurrency === "usd") return roundMoney(numeric * usdRate);
+  return roundMoney(numeric);
+}
+
+function parsePayload(body, usdRate) {
   const allowPieceSale = Boolean(body?.allowPieceSale);
   const paymentType = String(body?.paymentType || "naqd").toLowerCase();
+  const priceCurrency = String(body?.priceCurrency || "uzs").toLowerCase();
   const quantity = Number(body?.quantity);
-  const purchasePrice = Number(body?.purchasePrice);
-  const totalPurchaseCost = quantity * purchasePrice;
-  const rawPaid = Number(body?.paidAmount);
+  const purchasePrice = convertToUzs(body?.purchasePrice, priceCurrency, usdRate);
+  const totalPurchaseCost = roundMoney(quantity * purchasePrice);
+  const rawPaid = convertToUzs(body?.paidAmount, priceCurrency, usdRate);
   const paidAmount = paymentType === "naqd"
     ? totalPurchaseCost
     : paymentType === "qarz"
@@ -29,9 +48,11 @@ function parsePayload(body) {
     categoryId: String(body?.categoryId || "").trim(),
     supplierId: String(body?.supplierId || "").trim(),
     purchasePrice,
+    priceCurrency,
+    usdRateUsed: usdRate,
     totalPurchaseCost: Number.isFinite(totalPurchaseCost) ? totalPurchaseCost : 0,
-    retailPrice: Number(body?.retailPrice),
-    wholesalePrice: Number(body?.wholesalePrice),
+    retailPrice: convertToUzs(body?.retailPrice, priceCurrency, usdRate),
+    wholesalePrice: convertToUzs(body?.wholesalePrice, priceCurrency, usdRate),
     paymentType,
     paidAmount: Number.isFinite(paidAmount) ? paidAmount : 0,
     debtAmount,
@@ -40,7 +61,7 @@ function parsePayload(body) {
     allowPieceSale,
     pieceUnit: String(body?.pieceUnit || "kg").trim().toLowerCase(),
     pieceQtyPerBase: Number(body?.pieceQtyPerBase),
-    piecePrice: Number(body?.piecePrice)
+    piecePrice: convertToUzs(body?.piecePrice, priceCurrency, usdRate)
   };
 }
 
@@ -51,6 +72,7 @@ function validatePayload(payload) {
   if ([payload.purchasePrice, payload.retailPrice, payload.wholesalePrice, payload.quantity, payload.paidAmount].some((n) => Number.isNaN(n) || n < 0)) {
     return "Narx va miqdor manfiy bo'lmasligi kerak";
   }
+  if (!["uzs", "usd"].includes(payload.priceCurrency)) return "Valyuta noto'g'ri";
   if (!["naqd", "qarz", "qisman"].includes(payload.paymentType)) return "To'lov turi noto'g'ri";
   if (payload.paidAmount > payload.totalPurchaseCost) return "To'langan summa umumiy summadan katta bo'lmasin";
   if (!PRODUCT_UNITS.includes(payload.unit)) {
@@ -87,7 +109,8 @@ router.get("/", authMiddleware, async (req, res) => {
 });
 
 router.post("/", authMiddleware, async (req, res) => {
-  const payload = parsePayload(req.body);
+  const usdRate = await getUsdRate();
+  const payload = parsePayload(req.body, usdRate);
   const invalid = validatePayload(payload);
   if (invalid) return res.status(400).json({ message: invalid });
 
@@ -109,6 +132,8 @@ router.post("/", authMiddleware, async (req, res) => {
     quantity: payload.quantity,
     unit: payload.unit,
     purchasePrice: payload.purchasePrice,
+    priceCurrency: payload.priceCurrency,
+    usdRateUsed: payload.usdRateUsed,
     totalCost: payload.totalPurchaseCost,
     paidAmount: payload.paidAmount,
     debtAmount: payload.debtAmount,
@@ -125,18 +150,24 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
   const supplierId = String(req.body?.supplierId || "").trim();
   const incomingQuantity = Number(req.body?.quantity);
   const purchasePrice = Number(req.body?.purchasePrice);
-  const retailPriceNew = Number(req.body?.retailPrice);
-  const wholesalePriceNew = Number(req.body?.wholesalePrice);
-  const piecePriceNew = Number(req.body?.piecePrice);
+  const priceCurrency = String(req.body?.priceCurrency || "uzs").toLowerCase();
   const pricingMode = String(req.body?.pricingMode || "keep_old").toLowerCase();
   const paymentType = String(req.body?.paymentType || "naqd").toLowerCase();
-  const rawPaid = Number(req.body?.paidAmount);
+  const usdRate = await getUsdRate();
+  const purchasePriceUzs = convertToUzs(purchasePrice, priceCurrency, usdRate);
+  const retailPriceNew = convertToUzs(req.body?.retailPrice, priceCurrency, usdRate);
+  const wholesalePriceNew = convertToUzs(req.body?.wholesalePrice, priceCurrency, usdRate);
+  const piecePriceNew = convertToUzs(req.body?.piecePrice, priceCurrency, usdRate);
+  const rawPaid = convertToUzs(req.body?.paidAmount, priceCurrency, usdRate);
 
   if (!supplierId) return res.status(400).json({ message: "Yetkazib beruvchi tanlang" });
   if (!Number.isFinite(incomingQuantity) || incomingQuantity <= 0) {
     return res.status(400).json({ message: "Kirim miqdori 0 dan katta bo'lishi kerak" });
   }
-  if (!Number.isFinite(purchasePrice) || purchasePrice < 0) {
+  if (!["uzs", "usd"].includes(priceCurrency)) {
+    return res.status(400).json({ message: "Valyuta noto'g'ri" });
+  }
+  if (!Number.isFinite(purchasePriceUzs) || purchasePriceUzs < 0) {
     return res.status(400).json({ message: "Kelish narxi noto'g'ri" });
   }
   if (!PRICING_MODES.includes(pricingMode)) {
@@ -161,7 +192,7 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
     }
   }
 
-  const incomingTotal = incomingQuantity * purchasePrice;
+  const incomingTotal = roundMoney(incomingQuantity * purchasePriceUzs);
   const paidAmount = paymentType === "naqd" ? incomingTotal : paymentType === "qarz" ? 0 : rawPaid;
   if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > incomingTotal) {
     return res.status(400).json({ message: "To'langan summa noto'g'ri" });
@@ -192,10 +223,12 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
   const oldCost = Number(product.purchasePrice) || 0;
   const weightedPurchasePrice = newQty > 0
     ? ((oldCost * oldQty) + incomingTotal) / newQty
-    : purchasePrice;
+    : purchasePriceUzs;
 
   product.quantity = newQty;
   product.purchasePrice = weightedPurchasePrice;
+  product.priceCurrency = priceCurrency;
+  product.usdRateUsed = usdRate;
   product.totalPurchaseCost = incomingTotal;
   product.retailPrice = retailPrice;
   product.wholesalePrice = wholesalePrice;
@@ -217,7 +250,9 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
     productModel: product.model,
     quantity: incomingQuantity,
     unit: product.unit,
-    purchasePrice,
+    purchasePrice: purchasePriceUzs,
+    priceCurrency,
+    usdRateUsed: usdRate,
     totalCost: incomingTotal,
     paidAmount,
     debtAmount,
@@ -229,7 +264,8 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
 });
 
 router.put("/:id", authMiddleware, async (req, res) => {
-  const payload = parsePayload(req.body);
+  const usdRate = await getUsdRate();
+  const payload = parsePayload(req.body, usdRate);
   const invalid = validatePayload(payload);
   if (invalid) return res.status(400).json({ message: invalid });
 

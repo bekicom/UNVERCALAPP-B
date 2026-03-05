@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 const appSettingsSchema = new mongoose.Schema(
   {
     lowStockThreshold: { type: Number, required: true, min: 0, default: 5 },
+    usdRate: { type: Number, required: true, min: 1, default: 12171 },
     keyboardEnabled: { type: Boolean, required: true, default: true },
     receipt: {
       title: { type: String, trim: true, default: "CHEK" },
