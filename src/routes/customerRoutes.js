@@ -1,0 +1,150 @@
+import { Router } from "express";
+import { authMiddleware } from "../authMiddleware.js";
+import { Customer } from "../models/Customer.js";
+import { CustomerPayment } from "../models/CustomerPayment.js";
+import { Sale } from "../models/Sale.js";
+
+const router = Router();
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function roundMoney(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ message: "Faqat admin uchun" });
+  }
+  next();
+}
+
+router.get("/", authMiddleware, requireAdmin, async (_, res) => {
+  const customers = await Customer.find().sort({ updatedAt: -1 }).lean();
+  const summary = customers.reduce(
+    (acc, c) => {
+      acc.totalCustomers += 1;
+      acc.totalDebt += Number(c.totalDebt || 0);
+      acc.totalPaid += Number(c.totalPaid || 0);
+      if (Number(c.totalDebt || 0) > 0) acc.activeDebtors += 1;
+      return acc;
+    },
+    { totalCustomers: 0, activeDebtors: 0, totalDebt: 0, totalPaid: 0 }
+  );
+
+  res.json({ customers, summary });
+});
+
+router.get("/lookup", authMiddleware, async (req, res) => {
+  const q = String(req.query?.q || "").trim();
+  const query = {};
+
+  if (q) {
+    const safe = escapeRegex(q);
+    query.$or = [
+      { fullName: { $regex: safe, $options: "i" } },
+      { phone: { $regex: safe, $options: "i" } },
+      { address: { $regex: safe, $options: "i" } }
+    ];
+  }
+
+  const customers = await Customer.find(query)
+    .select("_id fullName phone address totalDebt")
+    .sort({ updatedAt: -1 })
+    .limit(20)
+    .lean();
+
+  res.json({ customers });
+});
+
+router.get("/:id/ledger", authMiddleware, requireAdmin, async (req, res) => {
+  const customer = await Customer.findById(req.params.id).lean();
+  if (!customer) return res.status(404).json({ message: "Mijoz topilmadi" });
+
+  const [sales, payments] = await Promise.all([
+    Sale.find({ customerId: customer._id })
+      .sort({ createdAt: -1 })
+      .lean(),
+    CustomerPayment.find({ customerId: customer._id })
+      .sort({ paidAt: -1 })
+      .lean()
+  ]);
+
+  const totals = {
+    totalSalesAmount: sales.reduce((sum, s) => sum + Number(s.totalAmount || 0), 0),
+    totalDebt: Number(customer.totalDebt || 0),
+    totalPaid: Number(customer.totalPaid || 0)
+  };
+
+  res.json({ customer, sales, payments, totals });
+});
+
+router.post("/:id/payments", authMiddleware, requireAdmin, async (req, res) => {
+  const customer = await Customer.findById(req.params.id);
+  if (!customer) return res.status(404).json({ message: "Mijoz topilmadi" });
+
+  const amount = Number(req.body?.amount);
+  const note = String(req.body?.note || "").trim();
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ message: "To'lov summasi 0 dan katta bo'lishi kerak" });
+  }
+  if (Number(customer.totalDebt || 0) <= 0) {
+    return res.status(400).json({ message: "Mijozda ochiq qarz yo'q" });
+  }
+
+  const openSales = await Sale.find({
+    customerId: customer._id,
+    debtAmount: { $gt: 0 }
+  }).sort({ createdAt: 1, _id: 1 });
+
+  if (openSales.length < 1) {
+    customer.totalDebt = 0;
+    await customer.save();
+    return res.status(400).json({ message: "Qarz topilmadi, ma'lumot yangilandi" });
+  }
+
+  const totalDebtBefore = openSales.reduce((sum, s) => sum + Number(s.debtAmount || 0), 0);
+  const payable = Math.min(amount, totalDebtBefore);
+  let remaining = payable;
+  const allocations = [];
+
+  for (const sale of openSales) {
+    if (remaining <= 0) break;
+    const debt = Number(sale.debtAmount || 0);
+    if (debt <= 0) continue;
+
+    const applied = Math.min(remaining, debt);
+    sale.debtAmount = roundMoney(debt - applied);
+    sale.payments = sale.payments || { cash: 0, card: 0, click: 0 };
+    sale.payments.cash = roundMoney(Number(sale.payments.cash || 0) + applied);
+    await sale.save();
+
+    allocations.push({
+      saleId: sale._id,
+      appliedAmount: roundMoney(applied)
+    });
+
+    remaining = roundMoney(remaining - applied);
+  }
+
+  customer.totalDebt = roundMoney(Math.max(0, Number(customer.totalDebt || 0) - payable));
+  customer.totalPaid = roundMoney(Number(customer.totalPaid || 0) + payable);
+  await customer.save();
+
+  const payment = await CustomerPayment.create({
+    customerId: customer._id,
+    amount: payable,
+    note,
+    cashierId: req.user.id,
+    cashierUsername: req.user.username,
+    allocations
+  });
+
+  res.status(201).json({
+    payment,
+    paidAmount: payable,
+    totalDebtBefore,
+    totalDebtAfter: customer.totalDebt
+  });
+});
+
+export default router;
