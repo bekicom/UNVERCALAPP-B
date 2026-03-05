@@ -12,7 +12,7 @@ import { User } from "../src/models/User.js";
 
 dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)) });
 
-const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/uy_dokon";
+const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/unvercalapp";
 
 const categoriesData = [
   "Ichimlik",

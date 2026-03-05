@@ -39,7 +39,7 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   settings.lowStockThreshold = lowStockThreshold;
   settings.keyboardEnabled = keyboardEnabled;
   settings.receipt = {
-    title: title || "UY-DOKON CHEK",
+    title: title || "CHEK",
     footer: footer || "Xaridingiz uchun rahmat!",
     logoUrl
   };

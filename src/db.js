@@ -7,7 +7,7 @@ import { Supplier } from "./models/Supplier.js";
 import { Purchase } from "./models/Purchase.js";
 import { AppSettings } from "./models/AppSettings.js";
 
-const defaultMongoUri = "mongodb://127.0.0.1:27017/uy_dokon";
+const defaultMongoUri = "mongodb://127.0.0.1:27017/unvercalapp";
 const allowedUnits = ["dona", "kg", "blok", "pachka", "qop"];
 
 export async function initDb() {
