@@ -38,6 +38,12 @@ router.post("/login", async (req, res) => {
     return res.status(401).json({ message: "Login yoki parol noto'g'ri" });
   }
 
+  // Tenantni har doim tekshirish: no-tenant login holatida ham.
+  const resolvedTenant = tenant || await Tenant.findOne({ _id: user.tenantId }).lean();
+  if (!resolvedTenant || !resolvedTenant.isActive) {
+    return res.status(401).json({ message: "Tenant topilmadi yoki bloklangan" });
+  }
+
   const isValid = bcrypt.compareSync(password, user.passwordHash);
   if (!isValid) {
     return res.status(401).json({ message: "Login yoki parol noto'g'ri" });
@@ -54,7 +60,7 @@ router.post("/login", async (req, res) => {
     user: {
       id: user._id,
       tenantId: user.tenantId,
-      tenantSlug: tenant?.slug || null,
+      tenantSlug: resolvedTenant?.slug || null,
       username: user.username,
       role: user.role
     }
