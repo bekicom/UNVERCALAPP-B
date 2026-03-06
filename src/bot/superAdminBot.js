@@ -16,15 +16,15 @@ import { AppSettings } from "../models/AppSettings.js";
 
 const ROLES = new Set(["admin", "cashier"]);
 const BTN = {
-  TENANTS: "Tenantlar",
-  CREATE_TENANT: "Tenant yaratish",
-  CREATE_ADMIN: "Admin yaratish",
-  LIST_ADMINS: "Adminlar ro'yxati",
-  DISABLE_TENANT: "Tenant bloklash",
-  ENABLE_TENANT: "Tenant yoqish",
-  DELETE_TENANT: "Tenant o'chirish",
-  HELP: "Yordam",
-  MENU: "Menu",
+  TENANTS: "🏢 Tenantlar",
+  CREATE_TENANT: "➕ Tenant yaratish",
+  CREATE_ADMIN: "👤 Admin yaratish",
+  LIST_ADMINS: "📋 Adminlar ro'yxati",
+  DISABLE_TENANT: "⛔ Tenant bloklash",
+  ENABLE_TENANT: "✅ Tenant yoqish",
+  DELETE_TENANT: "🗑 Tenant o'chirish",
+  HELP: "ℹ️ Yordam",
+  MENU: "🏠 Menu",
 };
 
 function menuMarkup() {
@@ -43,6 +43,19 @@ function menuMarkup() {
 
 async function sendMainMenu(bot, chatId, text = "Amalni tanlang:") {
   await bot.sendMessage(chatId, text, { reply_markup: menuMarkup() });
+}
+
+function panelText() {
+  return [
+    "🛠 SUPER ADMIN PANEL",
+    "",
+    "Pastdagi tugmalardan foydalaning:",
+    "• Tenant yaratish / boshqarish",
+    "• Admin yaratish / ko'rish",
+    "• Tenantni bloklash yoki yoqish",
+    "",
+    "Bekor qilish: /cancel",
+  ].join("\n");
 }
 
 function parseList(raw) {
@@ -74,21 +87,13 @@ function parseArgs(text) {
 
 function helpText() {
   return [
-    "Super Admin bot buyruqlari:",
-    "Buttonlardan foydalansangiz qulay bo'ladi.",
+    "ℹ️ Yordam",
+    "Asosan pastdagi tugmalar bilan ishlang.",
+    "",
+    "Qo'shimcha buyruqlar:",
     "/myid",
     "/cancel (joriy jarayonni bekor qilish)",
     "/help",
-    "/list_tenants",
-    "/create_tenant slug|Nomi",
-    "/edit_tenant slug|Yangi nom|active(1/0)",
-    "/disable_tenant slug",
-    "/enable_tenant slug",
-    "/delete_tenant slug|force(yes/no)",
-    "/list_admins slug",
-    "/create_admin slug|username|password|role(admin/cashier)",
-    "/edit_admin slug|username|newUsername(-)|newPassword(-)|role(admin/cashier/-)",
-    "/delete_admin slug|username",
   ].join("\n");
 }
 
@@ -111,9 +116,9 @@ async function listTenants(bot, chatId) {
     return;
   }
   const text = tenants
-    .map((t, i) => `${i + 1}. ${t.slug} | ${t.name} | ${t.isActive ? "active" : "inactive"}`)
+    .map((t, i) => `${i + 1}. ${t.isActive ? "🟢" : "🔴"} ${t.slug} | ${t.name}`)
     .join("\n");
-  await bot.sendMessage(chatId, text);
+  await bot.sendMessage(chatId, `🏢 Tenantlar ro'yxati\n\n${text}`);
 }
 
 async function createTenant(bot, chatId, args) {
@@ -133,7 +138,7 @@ async function createTenant(bot, chatId, args) {
 
   const tenant = await Tenant.create({ slug, name, isActive: true });
   await AppSettings.create({ tenantId: tenant._id });
-  await bot.sendMessage(chatId, `Tenant yaratildi: ${tenant.slug} (${tenant.name})`);
+  await bot.sendMessage(chatId, `✅ Tenant yaratildi\n\n🏢 ${tenant.name}\n🔹 slug: ${tenant.slug}`);
 }
 
 async function editTenant(bot, chatId, args) {
@@ -151,7 +156,7 @@ async function editTenant(bot, chatId, args) {
     tenant.isActive = v === "1" || v === "true" || v === "active" || v === "yes";
   }
   await tenant.save();
-  await bot.sendMessage(chatId, `Yangilandi: ${tenant.slug} | ${tenant.name} | ${tenant.isActive ? "active" : "inactive"}`);
+  await bot.sendMessage(chatId, `✅ Tenant yangilandi\n\n🏢 ${tenant.name}\n🔹 slug: ${tenant.slug}\n🔸 holat: ${tenant.isActive ? "active" : "inactive"}`);
 }
 
 async function setTenantStatus(bot, chatId, args, isActive) {
@@ -163,7 +168,7 @@ async function setTenantStatus(bot, chatId, args, isActive) {
   }
   tenant.isActive = isActive;
   await tenant.save();
-  await bot.sendMessage(chatId, `${tenant.slug} => ${isActive ? "active" : "inactive"}`);
+  await bot.sendMessage(chatId, `${isActive ? "✅" : "⛔"} ${tenant.slug} => ${isActive ? "active" : "inactive"}`);
 }
 
 async function deleteTenant(bot, chatId, args) {
@@ -214,7 +219,7 @@ async function deleteTenant(bot, chatId, args) {
     AppSettings.deleteMany({ tenantId: tid }),
   ]);
   await Tenant.deleteOne({ _id: tid });
-  await bot.sendMessage(chatId, `Tenant o'chirildi: ${tenant.slug}`);
+  await bot.sendMessage(chatId, `🗑 Tenant o'chirildi: ${tenant.slug}`);
 }
 
 async function listAdmins(bot, chatId, args) {
@@ -232,7 +237,7 @@ async function listAdmins(bot, chatId, args) {
   }
 
   const text = users.map((u, i) => `${i + 1}. ${u.username} (${u.role})`).join("\n");
-  await bot.sendMessage(chatId, `${tenant.slug} users:\n${text}`);
+  await bot.sendMessage(chatId, `📋 ${tenant.slug} userlar:\n\n${text}`);
 }
 
 async function createAdmin(bot, chatId, args) {
@@ -271,7 +276,7 @@ async function createAdmin(bot, chatId, args) {
     passwordHash: bcrypt.hashSync(password, 10),
     role,
   });
-  await bot.sendMessage(chatId, `User yaratildi: ${tenant.slug} -> ${username} (${role})`);
+  await bot.sendMessage(chatId, `✅ User yaratildi\n\n🏢 ${tenant.slug}\n👤 ${username}\n🔸 ${role}`);
 }
 
 async function editAdmin(bot, chatId, args) {
@@ -326,7 +331,7 @@ async function editAdmin(bot, chatId, args) {
   }
 
   await user.save();
-  await bot.sendMessage(chatId, `Yangilandi: ${tenant.slug} -> ${user.username} (${user.role})`);
+  await bot.sendMessage(chatId, `✅ User yangilandi\n\n🏢 ${tenant.slug}\n👤 ${user.username}\n🔸 ${user.role}`);
 }
 
 async function deleteAdmin(bot, chatId, args) {
@@ -353,7 +358,7 @@ async function deleteAdmin(bot, chatId, args) {
   }
 
   await User.deleteOne({ _id: user._id });
-  await bot.sendMessage(chatId, `User o'chirildi: ${tenant.slug} -> ${username}`);
+  await bot.sendMessage(chatId, `🗑 User o'chirildi: ${tenant.slug} -> ${username}`);
 }
 
 export function startSuperAdminBot() {
@@ -542,18 +547,18 @@ export function startSuperAdminBot() {
         return;
       }
       if (text === BTN.HELP || text === "/help") {
-        await bot.sendMessage(chatId, helpText());
-        await sendMainMenu(bot, chatId);
+        await bot.sendMessage(chatId, panelText());
+        await sendMainMenu(bot, chatId, "👇 Tugmalardan birini bosing:");
         return;
       }
       if (text === "/start") {
         await bot.sendMessage(chatId, helpText());
-        await sendMainMenu(bot, chatId);
+        await sendMainMenu(bot, chatId, panelText());
         return;
       }
       if (text === BTN.TENANTS) {
         await listTenants(bot, chatId);
-        await sendMainMenu(bot, chatId);
+        await sendMainMenu(bot, chatId, panelText());
         return;
       }
       if (text === BTN.CREATE_TENANT) {
