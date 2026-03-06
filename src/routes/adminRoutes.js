@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { authMiddleware } from "../authMiddleware.js";
 import { User } from "../models/User.js";
 import { Product } from "../models/Product.js";
+import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
 const ROLES = ["admin", "cashier"];
@@ -17,8 +18,8 @@ function requireAdmin(req, res, next) {
 
 router.get("/overview", authMiddleware, async (req, res) => {
   const [users, products] = await Promise.all([
-    User.countDocuments(),
-    Product.countDocuments()
+    User.countDocuments(tenantFilter(req)),
+    Product.countDocuments(tenantFilter(req))
   ]);
 
   return res.json({
@@ -31,8 +32,8 @@ router.get("/overview", authMiddleware, async (req, res) => {
   });
 });
 
-router.get("/users", authMiddleware, requireAdmin, async (_, res) => {
-  const users = await User.find().select("_id username role createdAt updatedAt").sort({ createdAt: -1 }).lean();
+router.get("/users", authMiddleware, requireAdmin, async (req, res) => {
+  const users = await User.find(tenantFilter(req)).select("_id username role createdAt updatedAt").sort({ createdAt: -1 }).lean();
   res.json({ users });
 });
 
@@ -51,11 +52,11 @@ router.post("/users", authMiddleware, requireAdmin, async (req, res) => {
     return res.status(400).json({ message: "Parol kamida 4 ta belgidan iborat bo'lsin" });
   }
 
-  const exists = await User.exists({ username: { $regex: `^${escapeRegex(username)}$`, $options: "i" } });
+  const exists = await User.exists(tenantFilter(req, { username: { $regex: `^${escapeRegex(username)}$`, $options: "i" } }));
   if (exists) return res.status(409).json({ message: "Bu username band" });
 
   const passwordHash = bcrypt.hashSync(password, 10);
-  const user = await User.create({ username, passwordHash, role });
+  const user = await User.create(withTenant(req, { username, passwordHash, role }));
 
   res.status(201).json({
     user: { _id: user._id, username: user.username, role: user.role, createdAt: user.createdAt, updatedAt: user.updatedAt }
@@ -74,13 +75,13 @@ router.put("/users/:id", authMiddleware, requireAdmin, async (req, res) => {
     return res.status(400).json({ message: "Rol noto'g'ri" });
   }
 
-  const user = await User.findById(req.params.id);
+  const user = await User.findOne(tenantFilter(req, { _id: req.params.id }));
   if (!user) return res.status(404).json({ message: "Foydalanuvchi topilmadi" });
 
-  const duplicate = await User.exists({
+  const duplicate = await User.exists(tenantFilter(req, {
     _id: { $ne: req.params.id },
     username: { $regex: `^${escapeRegex(username)}$`, $options: "i" }
-  });
+  }));
   if (duplicate) return res.status(409).json({ message: "Bu username band" });
 
   user.username = username;
@@ -95,7 +96,7 @@ router.put("/users/:id", authMiddleware, requireAdmin, async (req, res) => {
 
   // keep at least one admin in system
   if (user.role !== "admin") {
-    const adminCount = await User.countDocuments({ role: "admin", _id: { $ne: user._id } });
+    const adminCount = await User.countDocuments(tenantFilter(req, { role: "admin", _id: { $ne: user._id } }));
     if (adminCount < 1) {
       return res.status(400).json({ message: "Kamida 1 ta admin qolishi kerak" });
     }

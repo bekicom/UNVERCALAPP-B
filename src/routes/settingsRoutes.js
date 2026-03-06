@@ -11,10 +11,10 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-async function getOrCreateSettings() {
-  let settings = await AppSettings.findOne();
+async function getOrCreateSettings(tenantId) {
+  let settings = await AppSettings.findOne({ tenantId });
   if (!settings) {
-    settings = await AppSettings.create({});
+    settings = await AppSettings.create({ tenantId });
   } else if (!Number.isFinite(Number(settings.usdRate)) || Number(settings.usdRate) <= 0) {
     settings.usdRate = 12171;
     await settings.save();
@@ -22,8 +22,8 @@ async function getOrCreateSettings() {
   return settings;
 }
 
-router.get("/", authMiddleware, async (_, res) => {
-  const settings = await getOrCreateSettings();
+router.get("/", authMiddleware, async (req, res) => {
+  const settings = await getOrCreateSettings(req.user.tenantId);
   res.json({ settings });
 });
 
@@ -42,7 +42,7 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
     return res.status(400).json({ message: "USD kursi noto'g'ri" });
   }
 
-  const settings = await getOrCreateSettings();
+  const settings = await getOrCreateSettings(req.user.tenantId);
   settings.lowStockThreshold = lowStockThreshold;
   settings.usdRate = usdRate;
   settings.keyboardEnabled = keyboardEnabled;

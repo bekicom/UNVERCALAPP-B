@@ -1,0 +1,429 @@
+import bcrypt from "bcryptjs";
+import TelegramBot from "node-telegram-bot-api";
+import { Tenant } from "../models/Tenant.js";
+import { User } from "../models/User.js";
+import { Category } from "../models/Category.js";
+import { Product } from "../models/Product.js";
+import { Purchase } from "../models/Purchase.js";
+import { Sale } from "../models/Sale.js";
+import { Customer } from "../models/Customer.js";
+import { CustomerPayment } from "../models/CustomerPayment.js";
+import { Supplier } from "../models/Supplier.js";
+import { SupplierPayment } from "../models/SupplierPayment.js";
+import { Expense } from "../models/Expense.js";
+import { Warehouse } from "../models/Warehouse.js";
+import { AppSettings } from "../models/AppSettings.js";
+
+const ROLES = new Set(["admin", "cashier"]);
+
+function parseList(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function normalizeSlug(input) {
+  return String(input || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-_]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function parseArgs(text) {
+  const body = String(text || "").trim();
+  const firstSpace = body.indexOf(" ");
+  if (firstSpace < 0) return [];
+  return body
+    .slice(firstSpace + 1)
+    .split("|")
+    .map((p) => p.trim());
+}
+
+function helpText() {
+  return [
+    "Super Admin bot buyruqlari:",
+    "/myid",
+    "/help",
+    "/list_tenants",
+    "/create_tenant slug|Nomi",
+    "/edit_tenant slug|Yangi nom|active(1/0)",
+    "/disable_tenant slug",
+    "/enable_tenant slug",
+    "/delete_tenant slug|force(yes/no)",
+    "/list_admins slug",
+    "/create_admin slug|username|password|role(admin/cashier)",
+    "/edit_admin slug|username|newUsername(-)|newPassword(-)|role(admin/cashier/-)",
+    "/delete_admin slug|username",
+  ].join("\n");
+}
+
+async function tenantBySlug(rawSlug) {
+  const slug = normalizeSlug(rawSlug);
+  if (!slug) return null;
+  return Tenant.findOne({ slug });
+}
+
+function canUseBot(msg, allowedIds) {
+  const id = String(msg?.from?.id || "");
+  if (!id) return false;
+  return allowedIds.has(id);
+}
+
+async function listTenants(bot, chatId) {
+  const tenants = await Tenant.find().sort({ createdAt: 1 }).lean();
+  if (tenants.length < 1) {
+    await bot.sendMessage(chatId, "Tenantlar topilmadi.");
+    return;
+  }
+  const text = tenants
+    .map((t, i) => `${i + 1}. ${t.slug} | ${t.name} | ${t.isActive ? "active" : "inactive"}`)
+    .join("\n");
+  await bot.sendMessage(chatId, text);
+}
+
+async function createTenant(bot, chatId, args) {
+  const [slugRaw, nameRaw] = args;
+  const slug = normalizeSlug(slugRaw);
+  const name = String(nameRaw || "").trim();
+  if (!slug || !name) {
+    await bot.sendMessage(chatId, "Format: /create_tenant slug|Nomi");
+    return;
+  }
+
+  const exists = await Tenant.exists({ slug });
+  if (exists) {
+    await bot.sendMessage(chatId, "Bu slug band.");
+    return;
+  }
+
+  const tenant = await Tenant.create({ slug, name, isActive: true });
+  await AppSettings.create({ tenantId: tenant._id });
+  await bot.sendMessage(chatId, `Tenant yaratildi: ${tenant.slug} (${tenant.name})`);
+}
+
+async function editTenant(bot, chatId, args) {
+  const [slugRaw, newNameRaw, activeRaw] = args;
+  const tenant = await tenantBySlug(slugRaw);
+  if (!tenant) {
+    await bot.sendMessage(chatId, "Tenant topilmadi.");
+    return;
+  }
+
+  const newName = String(newNameRaw || "").trim();
+  if (newName) tenant.name = newName;
+  if (activeRaw != null && String(activeRaw).trim() !== "") {
+    const v = String(activeRaw).trim().toLowerCase();
+    tenant.isActive = v === "1" || v === "true" || v === "active" || v === "yes";
+  }
+  await tenant.save();
+  await bot.sendMessage(chatId, `Yangilandi: ${tenant.slug} | ${tenant.name} | ${tenant.isActive ? "active" : "inactive"}`);
+}
+
+async function setTenantStatus(bot, chatId, args, isActive) {
+  const [slugRaw] = args;
+  const tenant = await tenantBySlug(slugRaw);
+  if (!tenant) {
+    await bot.sendMessage(chatId, "Tenant topilmadi.");
+    return;
+  }
+  tenant.isActive = isActive;
+  await tenant.save();
+  await bot.sendMessage(chatId, `${tenant.slug} => ${isActive ? "active" : "inactive"}`);
+}
+
+async function deleteTenant(bot, chatId, args) {
+  const [slugRaw, forceRaw] = args;
+  const tenant = await tenantBySlug(slugRaw);
+  if (!tenant) {
+    await bot.sendMessage(chatId, "Tenant topilmadi.");
+    return;
+  }
+
+  const force = String(forceRaw || "").trim().toLowerCase() === "yes";
+  const tid = tenant._id;
+  const [users, categories, suppliers, products, purchases, sales, customers, customerPayments, supplierPayments, expenses, warehouses] = await Promise.all([
+    User.countDocuments({ tenantId: tid }),
+    Category.countDocuments({ tenantId: tid }),
+    Supplier.countDocuments({ tenantId: tid }),
+    Product.countDocuments({ tenantId: tid }),
+    Purchase.countDocuments({ tenantId: tid }),
+    Sale.countDocuments({ tenantId: tid }),
+    Customer.countDocuments({ tenantId: tid }),
+    CustomerPayment.countDocuments({ tenantId: tid }),
+    SupplierPayment.countDocuments({ tenantId: tid }),
+    Expense.countDocuments({ tenantId: tid }),
+    Warehouse.countDocuments({ tenantId: tid }),
+  ]);
+
+  const totalData = categories + suppliers + products + purchases + sales + customers + customerPayments + supplierPayments + expenses + warehouses;
+  if (!force && (users > 0 || totalData > 0)) {
+    await bot.sendMessage(
+      chatId,
+      `Tenant ichida ma'lumot bor.\nUsers=${users}, Data=${totalData}\nAgar o'chirish aniq bo'lsa: /delete_tenant ${tenant.slug}|yes`,
+    );
+    return;
+  }
+
+  await Promise.all([
+    User.deleteMany({ tenantId: tid }),
+    Category.deleteMany({ tenantId: tid }),
+    Supplier.deleteMany({ tenantId: tid }),
+    Product.deleteMany({ tenantId: tid }),
+    Purchase.deleteMany({ tenantId: tid }),
+    Sale.deleteMany({ tenantId: tid }),
+    Customer.deleteMany({ tenantId: tid }),
+    CustomerPayment.deleteMany({ tenantId: tid }),
+    SupplierPayment.deleteMany({ tenantId: tid }),
+    Expense.deleteMany({ tenantId: tid }),
+    Warehouse.deleteMany({ tenantId: tid }),
+    AppSettings.deleteMany({ tenantId: tid }),
+  ]);
+  await Tenant.deleteOne({ _id: tid });
+  await bot.sendMessage(chatId, `Tenant o'chirildi: ${tenant.slug}`);
+}
+
+async function listAdmins(bot, chatId, args) {
+  const [slugRaw] = args;
+  const tenant = await tenantBySlug(slugRaw);
+  if (!tenant) {
+    await bot.sendMessage(chatId, "Tenant topilmadi.");
+    return;
+  }
+
+  const users = await User.find({ tenantId: tenant._id }).select("username role createdAt").sort({ createdAt: 1 }).lean();
+  if (users.length < 1) {
+    await bot.sendMessage(chatId, "Foydalanuvchi topilmadi.");
+    return;
+  }
+
+  const text = users.map((u, i) => `${i + 1}. ${u.username} (${u.role})`).join("\n");
+  await bot.sendMessage(chatId, `${tenant.slug} users:\n${text}`);
+}
+
+async function createAdmin(bot, chatId, args) {
+  const [slugRaw, usernameRaw, passwordRaw, roleRaw] = args;
+  const tenant = await tenantBySlug(slugRaw);
+  const username = String(usernameRaw || "").trim();
+  const password = String(passwordRaw || "");
+  const role = String(roleRaw || "admin").trim().toLowerCase();
+
+  if (!tenant) {
+    await bot.sendMessage(chatId, "Tenant topilmadi.");
+    return;
+  }
+  if (!username || !password) {
+    await bot.sendMessage(chatId, "Format: /create_admin slug|username|password|role");
+    return;
+  }
+  if (password.length < 4) {
+    await bot.sendMessage(chatId, "Parol kamida 4 ta belgi bo'lishi kerak.");
+    return;
+  }
+  if (!ROLES.has(role)) {
+    await bot.sendMessage(chatId, "Role faqat admin yoki cashier bo'lishi kerak.");
+    return;
+  }
+
+  const exists = await User.exists({ tenantId: tenant._id, username });
+  if (exists) {
+    await bot.sendMessage(chatId, "Bu username shu tenantda band.");
+    return;
+  }
+
+  await User.create({
+    tenantId: tenant._id,
+    username,
+    passwordHash: bcrypt.hashSync(password, 10),
+    role,
+  });
+  await bot.sendMessage(chatId, `User yaratildi: ${tenant.slug} -> ${username} (${role})`);
+}
+
+async function editAdmin(bot, chatId, args) {
+  const [slugRaw, usernameRaw, newUsernameRaw, newPasswordRaw, roleRaw] = args;
+  const tenant = await tenantBySlug(slugRaw);
+  const username = String(usernameRaw || "").trim();
+  if (!tenant || !username) {
+    await bot.sendMessage(chatId, "Format: /edit_admin slug|username|newUsername(-)|newPassword(-)|role(admin/cashier/-)");
+    return;
+  }
+
+  const user = await User.findOne({ tenantId: tenant._id, username });
+  if (!user) {
+    await bot.sendMessage(chatId, "User topilmadi.");
+    return;
+  }
+
+  const newUsername = String(newUsernameRaw || "").trim();
+  const newPassword = String(newPasswordRaw || "");
+  const role = String(roleRaw || "").trim().toLowerCase();
+
+  if (newUsername && newUsername !== "-") {
+    const duplicate = await User.exists({ tenantId: tenant._id, username: newUsername, _id: { $ne: user._id } });
+    if (duplicate) {
+      await bot.sendMessage(chatId, "Yangi username band.");
+      return;
+    }
+    user.username = newUsername;
+  }
+
+  if (newPassword && newPassword !== "-") {
+    if (newPassword.length < 4) {
+      await bot.sendMessage(chatId, "Yangi parol kamida 4 ta belgi bo'lishi kerak.");
+      return;
+    }
+    user.passwordHash = bcrypt.hashSync(newPassword, 10);
+  }
+
+  if (role && role !== "-") {
+    if (!ROLES.has(role)) {
+      await bot.sendMessage(chatId, "Role faqat admin yoki cashier bo'lishi kerak.");
+      return;
+    }
+    if (user.role === "admin" && role !== "admin") {
+      const adminCount = await User.countDocuments({ tenantId: tenant._id, role: "admin", _id: { $ne: user._id } });
+      if (adminCount < 1) {
+        await bot.sendMessage(chatId, "Kamida bitta admin qolishi kerak.");
+        return;
+      }
+    }
+    user.role = role;
+  }
+
+  await user.save();
+  await bot.sendMessage(chatId, `Yangilandi: ${tenant.slug} -> ${user.username} (${user.role})`);
+}
+
+async function deleteAdmin(bot, chatId, args) {
+  const [slugRaw, usernameRaw] = args;
+  const tenant = await tenantBySlug(slugRaw);
+  const username = String(usernameRaw || "").trim();
+  if (!tenant || !username) {
+    await bot.sendMessage(chatId, "Format: /delete_admin slug|username");
+    return;
+  }
+
+  const user = await User.findOne({ tenantId: tenant._id, username });
+  if (!user) {
+    await bot.sendMessage(chatId, "User topilmadi.");
+    return;
+  }
+
+  if (user.role === "admin") {
+    const adminCount = await User.countDocuments({ tenantId: tenant._id, role: "admin", _id: { $ne: user._id } });
+    if (adminCount < 1) {
+      await bot.sendMessage(chatId, "Bu oxirgi admin, o'chirib bo'lmaydi.");
+      return;
+    }
+  }
+
+  await User.deleteOne({ _id: user._id });
+  await bot.sendMessage(chatId, `User o'chirildi: ${tenant.slug} -> ${username}`);
+}
+
+export function startSuperAdminBot() {
+  const token = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
+  if (!token) {
+    console.log("Telegram bot: TELEGRAM_BOT_TOKEN topilmadi, bot o'chirilgan.");
+    return null;
+  }
+
+  const allowedIds = new Set(parseList(process.env.SUPERADMIN_TELEGRAM_IDS));
+  if (allowedIds.size < 1) {
+    console.log("Telegram bot: SUPERADMIN_TELEGRAM_IDS bo'sh, bot buyruqlari bloklangan.");
+  }
+
+  const bot = new TelegramBot(token, { polling: true });
+  bot.setMyCommands([
+    { command: "myid", description: "Telegram ID ko'rish" },
+    { command: "help", description: "Yordam" },
+    { command: "list_tenants", description: "Tenantlar ro'yxati" },
+    { command: "create_tenant", description: "Tenant yaratish" },
+    { command: "edit_tenant", description: "Tenantni tahrirlash" },
+    { command: "disable_tenant", description: "Tenantni bloklash" },
+    { command: "enable_tenant", description: "Tenantni yoqish" },
+    { command: "delete_tenant", description: "Tenantni o'chirish" },
+    { command: "list_admins", description: "Tenant userlari" },
+    { command: "create_admin", description: "User yaratish" },
+    { command: "edit_admin", description: "Userni tahrirlash" },
+    { command: "delete_admin", description: "Userni o'chirish" },
+  ]).catch(() => {});
+
+  bot.on("message", async (msg) => {
+    try {
+      const chatId = msg.chat.id;
+      const text = String(msg.text || "").trim();
+      if (!text.startsWith("/")) return;
+
+      if (text.startsWith("/myid")) {
+        await bot.sendMessage(chatId, `Sizning Telegram ID: ${msg.from?.id}`);
+        return;
+      }
+
+      if (!canUseBot(msg, allowedIds)) {
+        await bot.sendMessage(chatId, "Sizda ruxsat yo'q. Adminga Telegram ID yuboring.");
+        return;
+      }
+
+      if (text.startsWith("/start") || text.startsWith("/help")) {
+        await bot.sendMessage(chatId, helpText());
+        return;
+      }
+      if (text.startsWith("/list_tenants")) {
+        await listTenants(bot, chatId);
+        return;
+      }
+      if (text.startsWith("/create_tenant")) {
+        await createTenant(bot, chatId, parseArgs(text));
+        return;
+      }
+      if (text.startsWith("/edit_tenant")) {
+        await editTenant(bot, chatId, parseArgs(text));
+        return;
+      }
+      if (text.startsWith("/disable_tenant")) {
+        await setTenantStatus(bot, chatId, parseArgs(text), false);
+        return;
+      }
+      if (text.startsWith("/enable_tenant")) {
+        await setTenantStatus(bot, chatId, parseArgs(text), true);
+        return;
+      }
+      if (text.startsWith("/delete_tenant")) {
+        await deleteTenant(bot, chatId, parseArgs(text));
+        return;
+      }
+      if (text.startsWith("/list_admins")) {
+        await listAdmins(bot, chatId, parseArgs(text));
+        return;
+      }
+      if (text.startsWith("/create_admin")) {
+        await createAdmin(bot, chatId, parseArgs(text));
+        return;
+      }
+      if (text.startsWith("/edit_admin")) {
+        await editAdmin(bot, chatId, parseArgs(text));
+        return;
+      }
+      if (text.startsWith("/delete_admin")) {
+        await deleteAdmin(bot, chatId, parseArgs(text));
+        return;
+      }
+
+      await bot.sendMessage(chatId, "Noma'lum buyruq. /help ni bosing.");
+    } catch (error) {
+      await bot.sendMessage(msg.chat.id, `Xatolik: ${error?.message || "noma'lum xatolik"}`);
+    }
+  });
+
+  bot.on("polling_error", (err) => {
+    console.error("Telegram bot polling xatosi:", err?.message || err);
+  });
+
+  console.log("Telegram super-admin bot ishga tushdi.");
+  return bot;
+}

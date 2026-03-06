@@ -12,6 +12,7 @@ import expenseRoutes from "./routes/expenseRoutes.js";
 import salesRoutes from "./routes/salesRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
 import settingsRoutes from "./routes/settingsRoutes.js";
+import { startSuperAdminBot } from "./bot/superAdminBot.js";
 
 dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)) });
 
@@ -39,4 +40,5 @@ initDb().then(() => {
   app.listen(port, () => {
     console.log(`API is running on http://localhost:${port}`);
   });
+  startSuperAdminBot();
 });

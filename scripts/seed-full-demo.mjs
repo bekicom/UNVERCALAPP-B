@@ -8,6 +8,7 @@ import { Product } from "../src/models/Product.js";
 import { Purchase } from "../src/models/Purchase.js";
 import { Supplier } from "../src/models/Supplier.js";
 import { SupplierPayment } from "../src/models/SupplierPayment.js";
+import { Tenant } from "../src/models/Tenant.js";
 import { User } from "../src/models/User.js";
 
 dotenv.config({ path: fileURLToPath(new URL("../.env", import.meta.url)) });
@@ -50,16 +51,17 @@ const expensesData = [
   { amount: 220000, reason: "Yetkazib berish transport xarajati", spentAt: new Date("2026-03-03T12:10:00.000Z") }
 ];
 
-async function ensureCashierUsers() {
+async function ensureCashierUsers(tenantId) {
   const cashierUsers = [
     { username: "kassir1", password: "1111", role: "cashier" },
     { username: "kassir2", password: "2222", role: "cashier" }
   ];
 
   for (const u of cashierUsers) {
-    const exists = await User.findOne({ username: u.username }).lean();
+    const exists = await User.findOne({ tenantId, username: u.username }).lean();
     if (exists) continue;
     await User.create({
+      tenantId,
       username: u.username,
       passwordHash: bcrypt.hashSync(u.password, 10),
       role: u.role
@@ -69,20 +71,26 @@ async function ensureCashierUsers() {
 
 async function main() {
   await mongoose.connect(mongoUri);
+  const tenantSlug = String(process.env.DEFAULT_TENANT_SLUG || "default").trim().toLowerCase();
+  let tenant = await Tenant.findOne({ slug: tenantSlug }).lean();
+  if (!tenant) {
+    tenant = await Tenant.create({ name: "Default Tenant", slug: tenantSlug, isActive: true });
+  }
+  const tenantId = tenant._id;
 
   await Promise.all([
-    Product.deleteMany({}),
-    Purchase.deleteMany({}),
-    SupplierPayment.deleteMany({}),
-    Expense.deleteMany({}),
-    Category.deleteMany({}),
-    Supplier.deleteMany({})
+    Product.deleteMany({ tenantId }),
+    Purchase.deleteMany({ tenantId }),
+    SupplierPayment.deleteMany({ tenantId }),
+    Expense.deleteMany({ tenantId }),
+    Category.deleteMany({ tenantId }),
+    Supplier.deleteMany({ tenantId })
   ]);
 
-  await ensureCashierUsers();
+  await ensureCashierUsers(tenantId);
 
-  const categories = await Category.insertMany(categoriesData.map((name) => ({ name })));
-  const suppliers = await Supplier.insertMany(suppliersData);
+  const categories = await Category.insertMany(categoriesData.map((name) => ({ tenantId, name })));
+  const suppliers = await Supplier.insertMany(suppliersData.map((s) => ({ ...s, tenantId })));
   const categoryMap = new Map(categories.map((c) => [c.name, c]));
   const supplierMap = new Map(suppliers.map((s) => [s.name, s]));
 
@@ -104,6 +112,7 @@ async function main() {
     dayOffset += 1;
 
     const product = await Product.create({
+      tenantId,
       name: item.name,
       model: item.model,
       categoryId: category._id,
@@ -124,6 +133,7 @@ async function main() {
     });
 
     const purchase = await Purchase.create({
+      tenantId,
       entryType: "initial",
       supplierId: supplier._id,
       productId: product._id,
@@ -147,6 +157,7 @@ async function main() {
   const baraka = suppliers.find((s) => s.name === "Baraka Trade");
   if (baraka) {
     const debtPurchases = await Purchase.find({
+      tenantId,
       supplierId: baraka._id,
       debtAmount: { $gt: 0 }
     }).sort({ purchasedAt: 1 });
@@ -174,6 +185,7 @@ async function main() {
     const paidAmount = allocations.reduce((sum, a) => sum + a.appliedAmount, 0);
     if (paidAmount > 0) {
       await SupplierPayment.create({
+        tenantId,
         supplierId: baraka._id,
         amount: paidAmount,
         note: "Demo to'lov: qarzdan qisman yopildi",
@@ -183,18 +195,19 @@ async function main() {
     }
   }
 
-  await Expense.insertMany(expensesData);
+  await Expense.insertMany(expensesData.map((e) => ({ ...e, tenantId })));
 
   const [categoryCount, supplierCount, productCount, purchaseCount, paymentCount, expenseCount] = await Promise.all([
-    Category.countDocuments(),
-    Supplier.countDocuments(),
-    Product.countDocuments(),
-    Purchase.countDocuments(),
-    SupplierPayment.countDocuments(),
-    Expense.countDocuments()
+    Category.countDocuments({ tenantId }),
+    Supplier.countDocuments({ tenantId }),
+    Product.countDocuments({ tenantId }),
+    Purchase.countDocuments({ tenantId }),
+    SupplierPayment.countDocuments({ tenantId }),
+    Expense.countDocuments({ tenantId })
   ]);
 
   const supplierStats = await Purchase.aggregate([
+    { $match: { tenantId } },
     {
       $group: {
         _id: "$supplierId",

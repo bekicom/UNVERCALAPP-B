@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 
 const purchaseSchema = new mongoose.Schema(
   {
+    tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Tenant", required: true, index: true },
     entryType: { type: String, enum: ["initial", "restock"], default: "initial" },
     supplierId: { type: mongoose.Schema.Types.ObjectId, ref: "Supplier", required: true },
     productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
@@ -22,6 +23,6 @@ const purchaseSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-purchaseSchema.index({ supplierId: 1, purchasedAt: -1 });
+purchaseSchema.index({ tenantId: 1, supplierId: 1, purchasedAt: -1 });
 
 export const Purchase = mongoose.model("Purchase", purchaseSchema);

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { authMiddleware } from "../authMiddleware.js";
 import { Warehouse } from "../models/Warehouse.js";
+import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
 const allowedTypes = ["asosiy", "kichik"];
@@ -15,8 +16,8 @@ function normalizePayload(body) {
   };
 }
 
-router.get("/", authMiddleware, async (_, res) => {
-  const warehouses = await Warehouse.find().sort({ createdAt: 1 }).lean();
+router.get("/", authMiddleware, async (req, res) => {
+  const warehouses = await Warehouse.find(tenantFilter(req)).sort({ createdAt: 1 }).lean();
   res.json({ warehouses });
 });
 
@@ -33,16 +34,16 @@ router.post("/", authMiddleware, async (req, res) => {
       .json({ message: "Tur faqat asosiy yoki kichik bo'lishi kerak" });
   }
 
-  const exists = await Warehouse.exists({ name });
+  const exists = await Warehouse.exists(tenantFilter(req, { name }));
   if (exists) {
     return res.status(409).json({ message: "Bunday ombor allaqachon bor" });
   }
 
-  const warehouse = await Warehouse.create({
+  const warehouse = await Warehouse.create(withTenant(req, {
     name,
     type,
     note,
-  });
+  }));
 
   return res.status(201).json({ warehouse });
 });
@@ -61,13 +62,13 @@ router.put("/:id", authMiddleware, async (req, res) => {
       .json({ message: "Tur faqat asosiy yoki kichik bo'lishi kerak" });
   }
 
-  const duplicate = await Warehouse.exists({ name, _id: { $ne: id } });
+  const duplicate = await Warehouse.exists(tenantFilter(req, { name, _id: { $ne: id } }));
   if (duplicate) {
     return res.status(409).json({ message: "Bu nomdagi ombor mavjud" });
   }
 
-  const updated = await Warehouse.findByIdAndUpdate(
-    id,
+  const updated = await Warehouse.findOneAndUpdate(
+    tenantFilter(req, { _id: id }),
     { name, type, note },
     { new: true, runValidators: true },
   );
@@ -81,7 +82,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const deleted = await Warehouse.findByIdAndDelete(id);
+  const deleted = await Warehouse.findOneAndDelete(tenantFilter(req, { _id: id }));
 
   if (!deleted) {
     return res.status(404).json({ message: "Ombor topilmadi" });

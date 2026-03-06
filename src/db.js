@@ -1,56 +1,119 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
+import { Tenant } from "./models/Tenant.js";
 import { User } from "./models/User.js";
 import { Category } from "./models/Category.js";
 import { Product } from "./models/Product.js";
 import { Supplier } from "./models/Supplier.js";
 import { Purchase } from "./models/Purchase.js";
 import { AppSettings } from "./models/AppSettings.js";
+import { Sale } from "./models/Sale.js";
+import { Expense } from "./models/Expense.js";
+import { Warehouse } from "./models/Warehouse.js";
+import { Customer } from "./models/Customer.js";
+import { CustomerPayment } from "./models/CustomerPayment.js";
+import { SupplierPayment } from "./models/SupplierPayment.js";
 
 const defaultMongoUri = "mongodb://127.0.0.1:27017/unvercalapp";
 const allowedUnits = ["dona", "kg", "blok", "pachka", "qop"];
+
+async function ensureDefaultTenant() {
+  const slug = String(process.env.DEFAULT_TENANT_SLUG || "default").trim().toLowerCase();
+  const name = String(process.env.DEFAULT_TENANT_NAME || "Default Tenant").trim();
+  let tenant = await Tenant.findOne({ slug });
+  if (!tenant) {
+    tenant = await Tenant.create({ name, slug, isActive: true });
+  }
+  return tenant;
+}
+
+async function backfillTenantId(defaultTenantId) {
+  const setTenant = { $set: { tenantId: defaultTenantId } };
+  const missing = { $or: [{ tenantId: { $exists: false } }, { tenantId: null }] };
+
+  await Promise.all([
+    User.updateMany(missing, setTenant),
+    Category.updateMany(missing, setTenant),
+    Supplier.updateMany(missing, setTenant),
+    Product.updateMany(missing, setTenant),
+    Purchase.updateMany(missing, setTenant),
+    Sale.updateMany(missing, setTenant),
+    Expense.updateMany(missing, setTenant),
+    Warehouse.updateMany(missing, setTenant),
+    Customer.updateMany(missing, setTenant),
+    CustomerPayment.updateMany(missing, setTenant),
+    SupplierPayment.updateMany(missing, setTenant),
+    AppSettings.updateMany(missing, setTenant)
+  ]);
+}
+
+async function dropLegacyUniqueIndexes() {
+  const drops = [
+    [User.collection, "username_1"],
+    [Category.collection, "name_1"],
+    [Supplier.collection, "name_1"],
+    [Warehouse.collection, "name_1"],
+    [Customer.collection, "phone_1"]
+  ];
+
+  for (const [collection, indexName] of drops) {
+    try {
+      const indexes = await collection.indexes();
+      if (indexes.some((idx) => idx.name === indexName)) {
+        await collection.dropIndex(indexName);
+      }
+    } catch {
+      // ignore legacy index drop errors; app can continue
+    }
+  }
+}
 
 export async function initDb() {
   const mongoUri = process.env.MONGO_URI || defaultMongoUri;
   await mongoose.connect(mongoUri);
 
-  const hasAdmin = await User.exists({ username: "admin" });
+  const defaultTenant = await ensureDefaultTenant();
+  await backfillTenantId(defaultTenant._id);
+  await dropLegacyUniqueIndexes();
+
+  const hasAdmin = await User.exists({ tenantId: defaultTenant._id, username: "admin" });
   if (!hasAdmin) {
     const passwordHash = bcrypt.hashSync("0000", 10);
     await User.create({
+      tenantId: defaultTenant._id,
       username: "admin",
       passwordHash,
       role: "admin"
     });
   }
 
-  const hasSettings = await AppSettings.exists({});
+  const hasSettings = await AppSettings.exists({ tenantId: defaultTenant._id });
   if (!hasSettings) {
-    await AppSettings.create({});
+    await AppSettings.create({ tenantId: defaultTenant._id });
   }
 
-  const categoryCount = await Category.countDocuments();
+  const categoryCount = await Category.countDocuments({ tenantId: defaultTenant._id });
   if (categoryCount === 0) {
     await Category.create([
-      { name: "Ichimlik" },
-      { name: "Mevalar" },
-      { name: "Shirinlik" }
+      { tenantId: defaultTenant._id, name: "Ichimlik" },
+      { tenantId: defaultTenant._id, name: "Mevalar" },
+      { tenantId: defaultTenant._id, name: "Shirinlik" }
     ]);
   }
 
-  const supplierCount = await Supplier.countDocuments();
+  const supplierCount = await Supplier.countDocuments({ tenantId: defaultTenant._id });
   if (supplierCount === 0) {
     await Supplier.create([
-      { name: "Coca-Cola Tashkent", address: "Toshkent", phone: "+998900000001" },
-      { name: "Mijoz Servis", address: "Toshkent", phone: "+998900000002" }
+      { tenantId: defaultTenant._id, name: "Coca-Cola Tashkent", address: "Toshkent", phone: "+998900000001" },
+      { tenantId: defaultTenant._id, name: "Mijoz Servis", address: "Toshkent", phone: "+998900000002" }
     ]);
   }
 
   // Migrate legacy products to new schema fields.
-  const fallbackCategory = await Category.findOne().lean();
+  const fallbackCategory = await Category.findOne({ tenantId: defaultTenant._id }).lean();
   if (fallbackCategory) {
-    const fallbackSupplier = await Supplier.findOne().lean();
-    const legacyProducts = await Product.find().lean();
+    const fallbackSupplier = await Supplier.findOne({ tenantId: defaultTenant._id }).lean();
+    const legacyProducts = await Product.find({ tenantId: defaultTenant._id }).lean();
     for (const p of legacyProducts) {
       const patch = {};
 
@@ -104,14 +167,14 @@ export async function initDb() {
       }
 
       if (Object.keys(patch).length > 0) {
-        await Product.updateOne({ _id: p._id }, { $set: patch });
+        await Product.updateOne({ _id: p._id, tenantId: defaultTenant._id }, { $set: patch });
       }
     }
 
     // Backfill purchase history for legacy products that have no purchase log.
-    const products = await Product.find().lean();
+    const products = await Product.find({ tenantId: defaultTenant._id }).lean();
     for (const p of products) {
-      const hasPurchase = await Purchase.exists({ productId: p._id });
+      const hasPurchase = await Purchase.exists({ tenantId: defaultTenant._id, productId: p._id });
       if (hasPurchase) continue;
 
       const qty = Number(p.quantity) || 0;
@@ -123,6 +186,7 @@ export async function initDb() {
       if (!p.supplierId) continue;
 
       await Purchase.create({
+        tenantId: defaultTenant._id,
         entryType: "initial",
         supplierId: p.supplierId,
         productId: p._id,

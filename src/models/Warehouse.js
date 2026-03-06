@@ -2,7 +2,8 @@ import mongoose from "mongoose";
 
 const warehouseSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true, unique: true, trim: true },
+    tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Tenant", required: true, index: true },
+    name: { type: String, required: true, trim: true },
     type: {
       type: String,
       enum: ["asosiy", "kichik"],
@@ -12,5 +13,7 @@ const warehouseSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+warehouseSchema.index({ tenantId: 1, name: 1 }, { unique: true });
 
 export const Warehouse = mongoose.model("Warehouse", warehouseSchema);

@@ -5,6 +5,7 @@ import { Category } from "../models/Category.js";
 import { Supplier } from "../models/Supplier.js";
 import { Purchase } from "../models/Purchase.js";
 import { AppSettings } from "../models/AppSettings.js";
+import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
 const PRODUCT_UNITS = ["dona", "kg", "blok", "pachka", "qop"];
@@ -14,8 +15,8 @@ function roundMoney(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
-async function getUsdRate() {
-  const settings = await AppSettings.findOne().lean();
+async function getUsdRate(tenantId) {
+  const settings = await AppSettings.findOne({ tenantId }).lean();
   const rate = Number(settings?.usdRate || 0);
   return Number.isFinite(rate) && rate > 0 ? rate : 12171;
 }
@@ -95,7 +96,7 @@ function validatePayload(payload) {
 }
 
 router.get("/", authMiddleware, async (req, res) => {
-  const query = {};
+  const query = tenantFilter(req);
   if (req.query.categoryId) {
     query.categoryId = req.query.categoryId;
   }
@@ -109,21 +110,21 @@ router.get("/", authMiddleware, async (req, res) => {
 });
 
 router.post("/", authMiddleware, async (req, res) => {
-  const usdRate = await getUsdRate();
+  const usdRate = await getUsdRate(req.user.tenantId);
   const payload = parsePayload(req.body, usdRate);
   const invalid = validatePayload(payload);
   if (invalid) return res.status(400).json({ message: invalid });
 
-  const categoryExists = await Category.exists({ _id: payload.categoryId });
+  const categoryExists = await Category.exists(tenantFilter(req, { _id: payload.categoryId }));
   if (!categoryExists) return res.status(400).json({ message: "Kategoriya topilmadi" });
-  const supplierExists = await Supplier.exists({ _id: payload.supplierId });
+  const supplierExists = await Supplier.exists(tenantFilter(req, { _id: payload.supplierId }));
   if (!supplierExists) return res.status(400).json({ message: "Yetkazib beruvchi topilmadi" });
 
-  const exists = await Product.exists({ name: payload.name, model: payload.model, categoryId: payload.categoryId });
+  const exists = await Product.exists(tenantFilter(req, { name: payload.name, model: payload.model, categoryId: payload.categoryId }));
   if (exists) return res.status(409).json({ message: "Bu mahsulot allaqachon mavjud" });
 
-  const product = await Product.create(payload);
-  await Purchase.create({
+  const product = await Product.create(withTenant(req, payload));
+  await Purchase.create(withTenant(req, {
     entryType: "initial",
     supplierId: payload.supplierId,
     productId: product._id,
@@ -139,12 +140,12 @@ router.post("/", authMiddleware, async (req, res) => {
     debtAmount: payload.debtAmount,
     paymentType: payload.paymentType,
     pricingMode: "replace_all"
-  });
+  }));
   res.status(201).json({ product });
 });
 
 router.post("/:id/restock", authMiddleware, async (req, res) => {
-  const product = await Product.findById(req.params.id);
+  const product = await Product.findOne(tenantFilter(req, { _id: req.params.id }));
   if (!product) return res.status(404).json({ message: "Mahsulot topilmadi" });
 
   const supplierId = String(req.body?.supplierId || "").trim();
@@ -153,7 +154,7 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
   const priceCurrency = String(req.body?.priceCurrency || "uzs").toLowerCase();
   const pricingMode = String(req.body?.pricingMode || "keep_old").toLowerCase();
   const paymentType = String(req.body?.paymentType || "naqd").toLowerCase();
-  const usdRate = await getUsdRate();
+  const usdRate = await getUsdRate(req.user.tenantId);
   const purchasePriceUzs = convertToUzs(purchasePrice, priceCurrency, usdRate);
   const retailPriceNew = convertToUzs(req.body?.retailPrice, priceCurrency, usdRate);
   const wholesalePriceNew = convertToUzs(req.body?.wholesalePrice, priceCurrency, usdRate);
@@ -177,7 +178,7 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
     return res.status(400).json({ message: "To'lov turi noto'g'ri" });
   }
 
-  const supplierExists = await Supplier.exists({ _id: supplierId });
+  const supplierExists = await Supplier.exists(tenantFilter(req, { _id: supplierId }));
   if (!supplierExists) return res.status(400).json({ message: "Yetkazib beruvchi topilmadi" });
 
   if (pricingMode !== "keep_old") {
@@ -242,7 +243,7 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
 
   await product.save();
 
-  await Purchase.create({
+  await Purchase.create(withTenant(req, {
     entryType: "restock",
     supplierId,
     productId: product._id,
@@ -258,33 +259,33 @@ router.post("/:id/restock", authMiddleware, async (req, res) => {
     debtAmount,
     paymentType,
     pricingMode
-  });
+  }));
 
   return res.json({ product });
 });
 
 router.put("/:id", authMiddleware, async (req, res) => {
-  const usdRate = await getUsdRate();
+  const usdRate = await getUsdRate(req.user.tenantId);
   const payload = parsePayload(req.body, usdRate);
   const invalid = validatePayload(payload);
   if (invalid) return res.status(400).json({ message: invalid });
 
-  const categoryExists = await Category.exists({ _id: payload.categoryId });
+  const categoryExists = await Category.exists(tenantFilter(req, { _id: payload.categoryId }));
   if (!categoryExists) return res.status(400).json({ message: "Kategoriya topilmadi" });
-  const supplierExists = await Supplier.exists({ _id: payload.supplierId });
+  const supplierExists = await Supplier.exists(tenantFilter(req, { _id: payload.supplierId }));
   if (!supplierExists) return res.status(400).json({ message: "Yetkazib beruvchi topilmadi" });
 
-  const duplicate = await Product.exists({ name: payload.name, model: payload.model, categoryId: payload.categoryId, _id: { $ne: req.params.id } });
+  const duplicate = await Product.exists(tenantFilter(req, { name: payload.name, model: payload.model, categoryId: payload.categoryId, _id: { $ne: req.params.id } }));
   if (duplicate) return res.status(409).json({ message: "Bu mahsulot allaqachon mavjud" });
 
-  const updated = await Product.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true });
+  const updated = await Product.findOneAndUpdate(tenantFilter(req, { _id: req.params.id }), payload, { new: true, runValidators: true });
   if (!updated) return res.status(404).json({ message: "Mahsulot topilmadi" });
 
   res.json({ product: updated });
 });
 
 router.delete("/:id", authMiddleware, async (req, res) => {
-  const deleted = await Product.findByIdAndDelete(req.params.id);
+  const deleted = await Product.findOneAndDelete(tenantFilter(req, { _id: req.params.id }));
   if (!deleted) return res.status(404).json({ message: "Mahsulot topilmadi" });
   res.json({ ok: true });
 });

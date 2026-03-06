@@ -4,6 +4,7 @@ import { Customer } from "../models/Customer.js";
 import { CustomerPayment } from "../models/CustomerPayment.js";
 import { Product } from "../models/Product.js";
 import { Sale } from "../models/Sale.js";
+import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
 const PAYMENT_TYPES = ["cash", "card", "click", "mixed", "debt"];
@@ -125,13 +126,13 @@ router.get("/", authMiddleware, async (req, res) => {
   const period = String(req.query?.period || "").toLowerCase();
   const from = String(req.query?.from || "");
   const to = String(req.query?.to || "");
-  const query = {};
+  const query = tenantFilter(req);
   const createdAtRange = buildDateRangeQuery({ period, from, to });
   if (createdAtRange) {
     query.createdAt = createdAtRange;
   }
 
-  const paymentQuery = {};
+  const paymentQuery = tenantFilter(req);
   if (createdAtRange) {
     paymentQuery.paidAt = createdAtRange;
   }
@@ -235,7 +236,7 @@ router.get("/returns", authMiddleware, async (req, res) => {
   const returnCreatedAtRange = buildDateRangeQuery({ period, from, to });
 
   const pipeline = [
-    { $match: { returns: { $exists: true, $ne: [] } } },
+    { $match: tenantFilter(req, { returns: { $exists: true, $ne: [] } }) },
     { $unwind: "$returns" }
   ];
 
@@ -304,7 +305,7 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 
   const productIds = items.map((it) => it.productId);
-  const products = await Product.find({ _id: { $in: productIds } })
+  const products = await Product.find(tenantFilter(req, { _id: { $in: productIds } }))
     .select("_id name model unit quantity retailPrice purchasePrice")
     .lean();
 
@@ -366,15 +367,15 @@ router.post("/", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: "Qarzga sotuv uchun mijoz ismi, telefoni va manzili kerak" });
     }
 
-    customer = await Customer.findOne({ phone: customerInput.phone });
+    customer = await Customer.findOne(tenantFilter(req, { phone: customerInput.phone }));
     if (!customer) {
-      customer = await Customer.create({
+      customer = await Customer.create(withTenant(req, {
         fullName: customerInput.fullName,
         phone: customerInput.phone,
         address: customerInput.address,
         totalDebt: 0,
         totalPaid: 0
-      });
+      }));
     } else {
       customer.fullName = customerInput.fullName;
       customer.address = customerInput.address;
@@ -394,20 +395,20 @@ router.post("/", authMiddleware, async (req, res) => {
   const applied = [];
   for (const item of saleItems) {
     const updated = await Product.updateOne(
-      { _id: item.productId, quantity: { $gte: item.quantity } },
+      tenantFilter(req, { _id: item.productId, quantity: { $gte: item.quantity } }),
       { $inc: { quantity: -item.quantity } }
     );
 
     if (updated.modifiedCount !== 1) {
       for (const rollback of applied) {
-        await Product.updateOne({ _id: rollback.productId }, { $inc: { quantity: rollback.quantity } });
+        await Product.updateOne(tenantFilter(req, { _id: rollback.productId }), { $inc: { quantity: rollback.quantity } });
       }
       return res.status(409).json({ message: `${item.productName} qoldig'i yetarli emas` });
     }
     applied.push({ productId: item.productId, quantity: item.quantity });
   }
 
-  const sale = await Sale.create({
+  const sale = await Sale.create(withTenant(req, {
     cashierId: req.user.id,
     cashierUsername: req.user.username,
     items: saleItems,
@@ -420,7 +421,7 @@ router.post("/", authMiddleware, async (req, res) => {
     customerPhone: customer?.phone || "",
     customerAddress: customer?.address || "",
     debtAmount: paymentType === "debt" ? totalAmount : 0
-  });
+  }));
 
   if (customer) {
     customer.totalDebt = roundMoney(Number(customer.totalDebt || 0) + totalAmount);
@@ -431,7 +432,7 @@ router.post("/", authMiddleware, async (req, res) => {
 });
 
 router.post("/:id/returns", authMiddleware, async (req, res) => {
-  const sale = await Sale.findById(req.params.id);
+  const sale = await Sale.findOne(tenantFilter(req, { _id: req.params.id }));
   if (!sale) return res.status(404).json({ message: "Sotuv topilmadi" });
 
   const items = normalizeItems(req.body?.items);
@@ -523,12 +524,12 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
   const updatedStock = [];
   for (const item of returnItems) {
     const changed = await Product.updateOne(
-      { _id: item.productId },
+      tenantFilter(req, { _id: item.productId }),
       { $inc: { quantity: item.quantity } }
     );
     if (changed.matchedCount !== 1) {
       for (const rollback of updatedStock) {
-        await Product.updateOne({ _id: rollback.productId }, { $inc: { quantity: -rollback.quantity } });
+        await Product.updateOne(tenantFilter(req, { _id: rollback.productId }), { $inc: { quantity: -rollback.quantity } });
       }
       return res.status(409).json({ message: `${item.productName} omborda topilmadi` });
     }
@@ -549,7 +550,7 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
   sale.payments.click = roundMoney(Math.max(0, Number(sale.payments?.click || 0) - refundPayments.click));
 
   if (sale.customerId) {
-    const customer = await Customer.findById(sale.customerId);
+    const customer = await Customer.findOne(tenantFilter(req, { _id: sale.customerId }));
     if (customer) {
       if (paymentType === "debt") {
         customer.totalDebt = roundMoney(Math.max(0, Number(customer.totalDebt || 0) - returnTotal));

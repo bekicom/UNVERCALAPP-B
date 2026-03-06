@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { authMiddleware } from "../authMiddleware.js";
 import { Expense } from "../models/Expense.js";
+import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
 
-router.get("/", authMiddleware, async (_, res) => {
-  const expenses = await Expense.find().sort({ spentAt: -1, createdAt: -1 }).lean();
+router.get("/", authMiddleware, async (req, res) => {
+  const expenses = await Expense.find(tenantFilter(req)).sort({ spentAt: -1, createdAt: -1 }).lean();
   res.json({ expenses });
 });
 
@@ -24,7 +25,7 @@ router.post("/", authMiddleware, async (req, res) => {
     return res.status(400).json({ message: "Sana noto'g'ri" });
   }
 
-  const expense = await Expense.create({ amount, reason, spentAt });
+  const expense = await Expense.create(withTenant(req, { amount, reason, spentAt }));
   res.status(201).json({ expense });
 });
 
@@ -43,8 +44,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
     return res.status(400).json({ message: "Sana noto'g'ri" });
   }
 
-  const updated = await Expense.findByIdAndUpdate(
-    req.params.id,
+  const updated = await Expense.findOneAndUpdate(
+    tenantFilter(req, { _id: req.params.id }),
     { amount, reason, spentAt },
     { new: true, runValidators: true }
   );
@@ -54,7 +55,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 router.delete("/:id", authMiddleware, async (req, res) => {
-  const deleted = await Expense.findByIdAndDelete(req.params.id);
+  const deleted = await Expense.findOneAndDelete(tenantFilter(req, { _id: req.params.id }));
   if (!deleted) return res.status(404).json({ message: "Xarajat topilmadi" });
   res.json({ ok: true });
 });

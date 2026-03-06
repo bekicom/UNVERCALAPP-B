@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 
 const supplierPaymentSchema = new mongoose.Schema(
   {
+    tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Tenant", required: true, index: true },
     supplierId: { type: mongoose.Schema.Types.ObjectId, ref: "Supplier", required: true },
     amount: { type: Number, required: true, min: 0 },
     note: { type: String, default: "", trim: true },
@@ -18,6 +19,6 @@ const supplierPaymentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-supplierPaymentSchema.index({ supplierId: 1, paidAt: -1 });
+supplierPaymentSchema.index({ tenantId: 1, supplierId: 1, paidAt: -1 });
 
 export const SupplierPayment = mongoose.model("SupplierPayment", supplierPaymentSchema);

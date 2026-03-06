@@ -2,17 +2,37 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
+import { Tenant } from "../models/Tenant.js";
 
 const router = Router();
 
 router.post("/login", async (req, res) => {
-  const { username, password } = req.body;
+  const username = String(req.body?.username || "").trim();
+  const password = String(req.body?.password || "");
+  const tenantSlug = String(req.body?.tenantSlug || "").trim().toLowerCase();
 
   if (!username || !password) {
     return res.status(400).json({ message: "Username va parol kerak" });
   }
 
-  const user = await User.findOne({ username }).lean();
+  let tenant = null;
+  if (tenantSlug) {
+    tenant = await Tenant.findOne({ slug: tenantSlug, isActive: true }).lean();
+    if (!tenant) {
+      return res.status(401).json({ message: "Tenant topilmadi yoki bloklangan" });
+    }
+  }
+
+  let user = null;
+  if (tenant) {
+    user = await User.findOne({ tenantId: tenant._id, username }).lean();
+  } else {
+    const users = await User.find({ username }).sort({ createdAt: 1 }).limit(2).lean();
+    if (users.length > 1) {
+      return res.status(400).json({ message: "Bir xil login bir nechta filialda bor. Tenant kodini kiriting" });
+    }
+    user = users[0] || null;
+  }
 
   if (!user) {
     return res.status(401).json({ message: "Login yoki parol noto'g'ri" });
@@ -24,7 +44,7 @@ router.post("/login", async (req, res) => {
   }
 
   const token = jwt.sign(
-    { id: user._id, username: user.username, role: user.role },
+    { id: user._id, tenantId: String(user.tenantId), username: user.username, role: user.role },
     process.env.JWT_SECRET,
     { expiresIn: "12h" }
   );
@@ -33,6 +53,8 @@ router.post("/login", async (req, res) => {
     token,
     user: {
       id: user._id,
+      tenantId: user.tenantId,
+      tenantSlug: tenant?.slug || null,
       username: user.username,
       role: user.role
     }

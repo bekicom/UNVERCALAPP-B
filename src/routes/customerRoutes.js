@@ -3,6 +3,7 @@ import { authMiddleware } from "../authMiddleware.js";
 import { Customer } from "../models/Customer.js";
 import { CustomerPayment } from "../models/CustomerPayment.js";
 import { Sale } from "../models/Sale.js";
+import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -18,8 +19,8 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-router.get("/", authMiddleware, requireAdmin, async (_, res) => {
-  const customers = await Customer.find().sort({ updatedAt: -1 }).lean();
+router.get("/", authMiddleware, requireAdmin, async (req, res) => {
+  const customers = await Customer.find(tenantFilter(req)).sort({ updatedAt: -1 }).lean();
   const summary = customers.reduce(
     (acc, c) => {
       acc.totalCustomers += 1;
@@ -36,7 +37,7 @@ router.get("/", authMiddleware, requireAdmin, async (_, res) => {
 
 router.get("/lookup", authMiddleware, async (req, res) => {
   const q = String(req.query?.q || "").trim();
-  const query = {};
+  const query = tenantFilter(req);
 
   if (q) {
     const safe = escapeRegex(q);
@@ -57,14 +58,14 @@ router.get("/lookup", authMiddleware, async (req, res) => {
 });
 
 router.get("/:id/ledger", authMiddleware, requireAdmin, async (req, res) => {
-  const customer = await Customer.findById(req.params.id).lean();
+  const customer = await Customer.findOne(tenantFilter(req, { _id: req.params.id })).lean();
   if (!customer) return res.status(404).json({ message: "Mijoz topilmadi" });
 
   const [sales, payments] = await Promise.all([
-    Sale.find({ customerId: customer._id })
+    Sale.find(tenantFilter(req, { customerId: customer._id }))
       .sort({ createdAt: -1 })
       .lean(),
-    CustomerPayment.find({ customerId: customer._id })
+    CustomerPayment.find(tenantFilter(req, { customerId: customer._id }))
       .sort({ paidAt: -1 })
       .lean()
   ]);
@@ -79,7 +80,7 @@ router.get("/:id/ledger", authMiddleware, requireAdmin, async (req, res) => {
 });
 
 router.post("/:id/payments", authMiddleware, requireAdmin, async (req, res) => {
-  const customer = await Customer.findById(req.params.id);
+  const customer = await Customer.findOne(tenantFilter(req, { _id: req.params.id }));
   if (!customer) return res.status(404).json({ message: "Mijoz topilmadi" });
 
   const amount = Number(req.body?.amount);
@@ -92,6 +93,7 @@ router.post("/:id/payments", authMiddleware, requireAdmin, async (req, res) => {
   }
 
   const openSales = await Sale.find({
+    tenantId: req.user.tenantId,
     customerId: customer._id,
     debtAmount: { $gt: 0 }
   }).sort({ createdAt: 1, _id: 1 });
@@ -130,14 +132,14 @@ router.post("/:id/payments", authMiddleware, requireAdmin, async (req, res) => {
   customer.totalPaid = roundMoney(Number(customer.totalPaid || 0) + payable);
   await customer.save();
 
-  const payment = await CustomerPayment.create({
+  const payment = await CustomerPayment.create(withTenant(req, {
     customerId: customer._id,
     amount: payable,
     note,
     cashierId: req.user.id,
     cashierUsername: req.user.username,
     allocations
-  });
+  }));
 
   res.status(201).json({
     payment,

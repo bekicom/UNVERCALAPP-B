@@ -4,21 +4,53 @@ import { Supplier } from "../models/Supplier.js";
 import { Product } from "../models/Product.js";
 import { Purchase } from "../models/Purchase.js";
 import { SupplierPayment } from "../models/SupplierPayment.js";
+import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
 
-router.get("/", authMiddleware, async (_, res) => {
-  const suppliers = await Supplier.find().sort({ name: 1 }).lean();
+function roundMoney(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+router.get("/", authMiddleware, async (req, res) => {
+  const suppliers = await Supplier.find(tenantFilter(req)).sort({ name: 1 }).lean();
 
   const stats = await Purchase.aggregate([
-    { $match: { supplierId: { $ne: null } } },
+    { $match: tenantFilter(req, { supplierId: { $ne: null } }) },
     {
       $group: {
         _id: "$supplierId",
         totalPurchase: { $sum: "$totalCost" },
         totalPaid: { $sum: "$paidAmount" },
-        totalDebt: { $sum: "$debtAmount" }
+        totalDebt: { $sum: "$debtAmount" },
+        totalPurchaseUsd: {
+          $sum: {
+            $cond: [
+              { $eq: ["$priceCurrency", "usd"] },
+              { $divide: ["$totalCost", { $ifNull: ["$usdRateUsed", 12171] }] },
+              0
+            ]
+          }
+        },
+        totalPaidUsd: {
+          $sum: {
+            $cond: [
+              { $eq: ["$priceCurrency", "usd"] },
+              { $divide: ["$paidAmount", { $ifNull: ["$usdRateUsed", 12171] }] },
+              0
+            ]
+          }
+        },
+        totalDebtUsd: {
+          $sum: {
+            $cond: [
+              { $eq: ["$priceCurrency", "usd"] },
+              { $divide: ["$debtAmount", { $ifNull: ["$usdRateUsed", 12171] }] },
+              0
+            ]
+          }
+        }
       }
     }
   ]);
@@ -31,7 +63,10 @@ router.get("/", authMiddleware, async (_, res) => {
       stats: {
         totalPurchase: st?.totalPurchase || 0,
         totalPaid: st?.totalPaid || 0,
-        totalDebt: st?.totalDebt || 0
+        totalDebt: st?.totalDebt || 0,
+        totalPurchaseUsd: roundMoney(st?.totalPurchaseUsd || 0),
+        totalPaidUsd: roundMoney(st?.totalPaidUsd || 0),
+        totalDebtUsd: roundMoney(st?.totalDebtUsd || 0)
       }
     };
   });
@@ -41,20 +76,47 @@ router.get("/", authMiddleware, async (_, res) => {
 
 router.get("/:id/purchases", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const supplier = await Supplier.findById(id).lean();
+  const supplier = await Supplier.findOne(tenantFilter(req, { _id: id })).lean();
   if (!supplier) return res.status(404).json({ message: "Yetkazib beruvchi topilmadi" });
 
-  const purchases = await Purchase.find({ supplierId: id }).sort({ purchasedAt: -1 }).lean();
-  const payments = await SupplierPayment.find({ supplierId: id }).sort({ paidAt: -1 }).lean();
+  const purchases = await Purchase.find(tenantFilter(req, { supplierId: id })).sort({ purchasedAt: -1 }).lean();
+  const payments = await SupplierPayment.find(tenantFilter(req, { supplierId: id })).sort({ paidAt: -1 }).lean();
 
   const daily = await Purchase.aggregate([
-    { $match: { supplierId: supplier._id } },
+    { $match: tenantFilter(req, { supplierId: supplier._id }) },
     {
       $group: {
         _id: { $dateToString: { format: "%Y-%m-%d", date: "$purchasedAt" } },
         totalCost: { $sum: "$totalCost" },
         totalPaid: { $sum: "$paidAmount" },
         totalDebt: { $sum: "$debtAmount" },
+        totalCostUsd: {
+          $sum: {
+            $cond: [
+              { $eq: ["$priceCurrency", "usd"] },
+              { $divide: ["$totalCost", { $ifNull: ["$usdRateUsed", 12171] }] },
+              0
+            ]
+          }
+        },
+        totalPaidUsd: {
+          $sum: {
+            $cond: [
+              { $eq: ["$priceCurrency", "usd"] },
+              { $divide: ["$paidAmount", { $ifNull: ["$usdRateUsed", 12171] }] },
+              0
+            ]
+          }
+        },
+        totalDebtUsd: {
+          $sum: {
+            $cond: [
+              { $eq: ["$priceCurrency", "usd"] },
+              { $divide: ["$debtAmount", { $ifNull: ["$usdRateUsed", 12171] }] },
+              0
+            ]
+          }
+        },
         totalQuantity: { $sum: "$quantity" },
         items: { $sum: 1 }
       }
@@ -67,26 +129,45 @@ router.get("/:id/purchases", authMiddleware, async (req, res) => {
       acc.totalPurchase += Number(p.totalCost) || 0;
       acc.totalPaid += Number(p.paidAmount) || 0;
       acc.totalDebt += Number(p.debtAmount) || 0;
+      if (String(p.priceCurrency || "").toLowerCase() === "usd") {
+        const rate = Number(p.usdRateUsed || 12171);
+        if (rate > 0) {
+          acc.totalPurchaseUsd += Number(p.totalCost || 0) / rate;
+          acc.totalPaidUsd += Number(p.paidAmount || 0) / rate;
+          acc.totalDebtUsd += Number(p.debtAmount || 0) / rate;
+        }
+      }
       return acc;
     },
-    { totalPurchase: 0, totalPaid: 0, totalDebt: 0 }
+    { totalPurchase: 0, totalPaid: 0, totalDebt: 0, totalPurchaseUsd: 0, totalPaidUsd: 0, totalDebtUsd: 0 }
   );
 
-  res.json({ supplier, purchases, daily, payments, totals });
+  totals.totalPurchaseUsd = roundMoney(totals.totalPurchaseUsd);
+  totals.totalPaidUsd = roundMoney(totals.totalPaidUsd);
+  totals.totalDebtUsd = roundMoney(totals.totalDebtUsd);
+
+  const dailyWithUsd = daily.map((d) => ({
+    ...d,
+    totalCostUsd: roundMoney(d.totalCostUsd || 0),
+    totalPaidUsd: roundMoney(d.totalPaidUsd || 0),
+    totalDebtUsd: roundMoney(d.totalDebtUsd || 0)
+  }));
+
+  res.json({ supplier, purchases, daily: dailyWithUsd, payments, totals });
 });
 
 router.get("/:id/payments", authMiddleware, async (req, res) => {
-  const supplier = await Supplier.findById(req.params.id).lean();
+  const supplier = await Supplier.findOne(tenantFilter(req, { _id: req.params.id })).lean();
   if (!supplier) return res.status(404).json({ message: "Yetkazib beruvchi topilmadi" });
 
-  const payments = await SupplierPayment.find({ supplierId: supplier._id }).sort({ paidAt: -1 }).lean();
+  const payments = await SupplierPayment.find(tenantFilter(req, { supplierId: supplier._id })).sort({ paidAt: -1 }).lean();
   const totalPaid = payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 
   res.json({ supplier, payments, totalPaid });
 });
 
 router.post("/:id/payments", authMiddleware, async (req, res) => {
-  const supplier = await Supplier.findById(req.params.id).lean();
+  const supplier = await Supplier.findOne(tenantFilter(req, { _id: req.params.id })).lean();
   if (!supplier) return res.status(404).json({ message: "Yetkazib beruvchi topilmadi" });
 
   const amount = Number(req.body?.amount);
@@ -96,6 +177,7 @@ router.post("/:id/payments", authMiddleware, async (req, res) => {
   }
 
   const debtPurchases = await Purchase.find({
+    tenantId: req.user.tenantId,
     supplierId: supplier._id,
     debtAmount: { $gt: 0 }
   }).sort({ purchasedAt: 1, _id: 1 });
@@ -133,12 +215,12 @@ router.post("/:id/payments", authMiddleware, async (req, res) => {
     remaining -= applied;
   }
 
-  const payment = await SupplierPayment.create({
+  const payment = await SupplierPayment.create(withTenant(req, {
     supplierId: supplier._id,
     amount: payable,
     note,
     allocations
-  });
+  }));
 
   const newTotalDebt = Math.max(0, totalDebt - payable);
 
@@ -157,10 +239,10 @@ router.post("/", authMiddleware, async (req, res) => {
 
   if (!name) return res.status(400).json({ message: "Yetkazib beruvchi nomi kerak" });
 
-  const exists = await Supplier.exists({ name: { $regex: `^${escapeRegex(name)}$`, $options: "i" } });
+  const exists = await Supplier.exists(tenantFilter(req, { name: { $regex: `^${escapeRegex(name)}$`, $options: "i" } }));
   if (exists) return res.status(409).json({ message: "Bu yetkazib beruvchi mavjud" });
 
-  const supplier = await Supplier.create({ name, address, phone });
+  const supplier = await Supplier.create(withTenant(req, { name, address, phone }));
   res.status(201).json({ supplier });
 });
 
@@ -171,14 +253,14 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
   if (!name) return res.status(400).json({ message: "Yetkazib beruvchi nomi kerak" });
 
-  const duplicate = await Supplier.exists({
+  const duplicate = await Supplier.exists(tenantFilter(req, {
     _id: { $ne: req.params.id },
     name: { $regex: `^${escapeRegex(name)}$`, $options: "i" }
-  });
+  }));
   if (duplicate) return res.status(409).json({ message: "Bu yetkazib beruvchi mavjud" });
 
-  const updated = await Supplier.findByIdAndUpdate(
-    req.params.id,
+  const updated = await Supplier.findOneAndUpdate(
+    tenantFilter(req, { _id: req.params.id }),
     { name, address, phone },
     { new: true, runValidators: true }
   );
@@ -188,14 +270,14 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 router.delete("/:id", authMiddleware, async (req, res) => {
-  const used = await Product.exists({ supplierId: req.params.id });
+  const used = await Product.exists(tenantFilter(req, { supplierId: req.params.id }));
   if (used) {
     return res.status(400).json({
       message: "Bu yetkazib beruvchi mahsulotlarga bog'langan, o'chirib bo'lmaydi"
     });
   }
 
-  const deleted = await Supplier.findByIdAndDelete(req.params.id);
+  const deleted = await Supplier.findOneAndDelete(tenantFilter(req, { _id: req.params.id }));
   if (!deleted) return res.status(404).json({ message: "Yetkazib beruvchi topilmadi" });
   res.json({ ok: true });
 });
