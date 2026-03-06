@@ -15,6 +15,35 @@ import { Warehouse } from "../models/Warehouse.js";
 import { AppSettings } from "../models/AppSettings.js";
 
 const ROLES = new Set(["admin", "cashier"]);
+const BTN = {
+  TENANTS: "Tenantlar",
+  CREATE_TENANT: "Tenant yaratish",
+  CREATE_ADMIN: "Admin yaratish",
+  LIST_ADMINS: "Adminlar ro'yxati",
+  DISABLE_TENANT: "Tenant bloklash",
+  ENABLE_TENANT: "Tenant yoqish",
+  DELETE_TENANT: "Tenant o'chirish",
+  HELP: "Yordam",
+  MENU: "Menu",
+};
+
+function menuMarkup() {
+  return {
+    keyboard: [
+      [BTN.TENANTS, BTN.CREATE_TENANT],
+      [BTN.CREATE_ADMIN, BTN.LIST_ADMINS],
+      [BTN.DISABLE_TENANT, BTN.ENABLE_TENANT],
+      [BTN.DELETE_TENANT],
+      [BTN.HELP, BTN.MENU],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+async function sendMainMenu(bot, chatId, text = "Amalni tanlang:") {
+  await bot.sendMessage(chatId, text, { reply_markup: menuMarkup() });
+}
 
 function parseList(raw) {
   return String(raw || "")
@@ -46,7 +75,9 @@ function parseArgs(text) {
 function helpText() {
   return [
     "Super Admin bot buyruqlari:",
+    "Buttonlardan foydalansangiz qulay bo'ladi.",
     "/myid",
+    "/cancel (joriy jarayonni bekor qilish)",
     "/help",
     "/list_tenants",
     "/create_tenant slug|Nomi",
@@ -338,6 +369,7 @@ export function startSuperAdminBot() {
   }
 
   const bot = new TelegramBot(token, { polling: true });
+  const sessions = new Map();
   bot.setMyCommands([
     { command: "myid", description: "Telegram ID ko'rish" },
     { command: "help", description: "Yordam" },
@@ -353,13 +385,140 @@ export function startSuperAdminBot() {
     { command: "delete_admin", description: "Userni o'chirish" },
   ]).catch(() => {});
 
+  function setSession(chatId, state) {
+    sessions.set(String(chatId), state);
+  }
+
+  function getSession(chatId) {
+    return sessions.get(String(chatId));
+  }
+
+  function clearSession(chatId) {
+    sessions.delete(String(chatId));
+  }
+
+  async function handleSessionInput(chatId, text) {
+    const state = getSession(chatId);
+    if (!state) return false;
+
+    if (state.flow === "create_tenant_slug") {
+      const slug = normalizeSlug(text);
+      if (!slug) {
+        await bot.sendMessage(chatId, "Slug noto'g'ri. Masalan: mini-market");
+        return true;
+      }
+      setSession(chatId, { flow: "create_tenant_name", data: { slug } });
+      await bot.sendMessage(chatId, "Tenant nomini yuboring:");
+      return true;
+    }
+
+    if (state.flow === "create_tenant_name") {
+      await createTenant(bot, chatId, [state.data.slug, text]);
+      clearSession(chatId);
+      await sendMainMenu(bot, chatId, "Tayyor.");
+      return true;
+    }
+
+    if (state.flow === "create_admin_tenant") {
+      const slug = normalizeSlug(text);
+      if (!slug) {
+        await bot.sendMessage(chatId, "Tenant slug noto'g'ri.");
+        return true;
+      }
+      setSession(chatId, { flow: "create_admin_username", data: { slug } });
+      await bot.sendMessage(chatId, "Loginni yuboring:");
+      return true;
+    }
+
+    if (state.flow === "create_admin_username") {
+      const username = String(text || "").trim();
+      if (!username) {
+        await bot.sendMessage(chatId, "Login bo'sh bo'lmasin.");
+        return true;
+      }
+      setSession(chatId, { flow: "create_admin_password", data: { ...state.data, username } });
+      await bot.sendMessage(chatId, "Parolni yuboring (kamida 4 ta belgi):");
+      return true;
+    }
+
+    if (state.flow === "create_admin_password") {
+      const password = String(text || "");
+      if (password.length < 4) {
+        await bot.sendMessage(chatId, "Parol kamida 4 ta belgi bo'lsin.");
+        return true;
+      }
+      setSession(chatId, { flow: "create_admin_role", data: { ...state.data, password } });
+      await bot.sendMessage(chatId, "Rol yuboring: admin yoki cashier");
+      return true;
+    }
+
+    if (state.flow === "create_admin_role") {
+      const role = String(text || "").trim().toLowerCase();
+      if (!ROLES.has(role)) {
+        await bot.sendMessage(chatId, "Rol noto'g'ri. admin yoki cashier yozing.");
+        return true;
+      }
+      await createAdmin(bot, chatId, [state.data.slug, state.data.username, state.data.password, role]);
+      clearSession(chatId);
+      await sendMainMenu(bot, chatId, "Tayyor.");
+      return true;
+    }
+
+    if (state.flow === "list_admins_tenant") {
+      await listAdmins(bot, chatId, [text]);
+      clearSession(chatId);
+      await sendMainMenu(bot, chatId);
+      return true;
+    }
+
+    if (state.flow === "disable_tenant_slug") {
+      await setTenantStatus(bot, chatId, [text], false);
+      clearSession(chatId);
+      await sendMainMenu(bot, chatId);
+      return true;
+    }
+
+    if (state.flow === "enable_tenant_slug") {
+      await setTenantStatus(bot, chatId, [text], true);
+      clearSession(chatId);
+      await sendMainMenu(bot, chatId);
+      return true;
+    }
+
+    if (state.flow === "delete_tenant_slug") {
+      const slug = normalizeSlug(text);
+      if (!slug) {
+        await bot.sendMessage(chatId, "Slug noto'g'ri.");
+        return true;
+      }
+      setSession(chatId, { flow: "delete_tenant_confirm", data: { slug } });
+      await bot.sendMessage(chatId, `Tasdiqlang: '${slug}' tenantini o'chirish uchun YES deb yozing.`);
+      return true;
+    }
+
+    if (state.flow === "delete_tenant_confirm") {
+      const ok = String(text || "").trim().toLowerCase();
+      if (ok !== "yes") {
+        clearSession(chatId);
+        await sendMainMenu(bot, chatId, "Bekor qilindi.");
+        return true;
+      }
+      await deleteTenant(bot, chatId, [state.data.slug, "yes"]);
+      clearSession(chatId);
+      await sendMainMenu(bot, chatId);
+      return true;
+    }
+
+    return false;
+  }
+
   bot.on("message", async (msg) => {
     try {
       const chatId = msg.chat.id;
       const text = String(msg.text || "").trim();
-      if (!text.startsWith("/")) return;
+      if (!text) return;
 
-      if (text.startsWith("/myid")) {
+      if (text === "/myid") {
         await bot.sendMessage(chatId, `Sizning Telegram ID: ${msg.from?.id}`);
         return;
       }
@@ -369,52 +528,121 @@ export function startSuperAdminBot() {
         return;
       }
 
-      if (text.startsWith("/start") || text.startsWith("/help")) {
+      if (text === "/cancel") {
+        clearSession(chatId);
+        await sendMainMenu(bot, chatId, "Joriy jarayon bekor qilindi.");
+        return;
+      }
+
+      const handledSession = await handleSessionInput(chatId, text);
+      if (handledSession) return;
+
+      if (text === BTN.MENU) {
+        await sendMainMenu(bot, chatId);
+        return;
+      }
+      if (text === BTN.HELP || text === "/help") {
         await bot.sendMessage(chatId, helpText());
+        await sendMainMenu(bot, chatId);
+        return;
+      }
+      if (text === "/start") {
+        await bot.sendMessage(chatId, helpText());
+        await sendMainMenu(bot, chatId);
+        return;
+      }
+      if (text === BTN.TENANTS) {
+        await listTenants(bot, chatId);
+        await sendMainMenu(bot, chatId);
+        return;
+      }
+      if (text === BTN.CREATE_TENANT) {
+        setSession(chatId, { flow: "create_tenant_slug", data: {} });
+        await bot.sendMessage(chatId, "Tenant slug yuboring (masalan: mini-market):");
+        return;
+      }
+      if (text === BTN.CREATE_ADMIN) {
+        setSession(chatId, { flow: "create_admin_tenant", data: {} });
+        await bot.sendMessage(chatId, "Qaysi tenant uchun? slug yuboring:");
+        return;
+      }
+      if (text === BTN.LIST_ADMINS) {
+        setSession(chatId, { flow: "list_admins_tenant", data: {} });
+        await bot.sendMessage(chatId, "Tenant slug yuboring:");
+        return;
+      }
+      if (text === BTN.DISABLE_TENANT) {
+        setSession(chatId, { flow: "disable_tenant_slug", data: {} });
+        await bot.sendMessage(chatId, "Bloklash uchun tenant slug yuboring:");
+        return;
+      }
+      if (text === BTN.ENABLE_TENANT) {
+        setSession(chatId, { flow: "enable_tenant_slug", data: {} });
+        await bot.sendMessage(chatId, "Yoqish uchun tenant slug yuboring:");
+        return;
+      }
+      if (text === BTN.DELETE_TENANT) {
+        setSession(chatId, { flow: "delete_tenant_slug", data: {} });
+        await bot.sendMessage(chatId, "O'chirish uchun tenant slug yuboring:");
+        return;
+      }
+
+      if (!text.startsWith("/")) {
+        await sendMainMenu(bot, chatId, "Buttonlardan foydalaning yoki /help ni bosing.");
         return;
       }
       if (text.startsWith("/list_tenants")) {
         await listTenants(bot, chatId);
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/create_tenant")) {
         await createTenant(bot, chatId, parseArgs(text));
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/edit_tenant")) {
         await editTenant(bot, chatId, parseArgs(text));
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/disable_tenant")) {
         await setTenantStatus(bot, chatId, parseArgs(text), false);
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/enable_tenant")) {
         await setTenantStatus(bot, chatId, parseArgs(text), true);
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/delete_tenant")) {
         await deleteTenant(bot, chatId, parseArgs(text));
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/list_admins")) {
         await listAdmins(bot, chatId, parseArgs(text));
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/create_admin")) {
         await createAdmin(bot, chatId, parseArgs(text));
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/edit_admin")) {
         await editAdmin(bot, chatId, parseArgs(text));
+        await sendMainMenu(bot, chatId);
         return;
       }
       if (text.startsWith("/delete_admin")) {
         await deleteAdmin(bot, chatId, parseArgs(text));
+        await sendMainMenu(bot, chatId);
         return;
       }
 
-      await bot.sendMessage(chatId, "Noma'lum buyruq. /help ni bosing.");
+      await sendMainMenu(bot, chatId, "Noma'lum buyruq. /help ni bosing.");
     } catch (error) {
       await bot.sendMessage(msg.chat.id, `Xatolik: ${error?.message || "noma'lum xatolik"}`);
     }
