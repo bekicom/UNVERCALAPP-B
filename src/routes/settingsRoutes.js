@@ -34,6 +34,7 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   const title = String(req.body?.receipt?.title || "").trim();
   const footer = String(req.body?.receipt?.footer || "").trim();
   const logoUrl = String(req.body?.receipt?.logoUrl || "").trim();
+  const fieldsRaw = req.body?.receipt?.fields || {};
 
   if (!Number.isFinite(lowStockThreshold) || lowStockThreshold < 0) {
     return res.status(400).json({ message: "Minimal qoldiq soni noto'g'ri" });
@@ -49,7 +50,18 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   settings.receipt = {
     title: title || "CHEK",
     footer: footer || "Xaridingiz uchun rahmat!",
-    logoUrl
+    logoUrl,
+    fields: {
+      showDate: fieldsRaw.showDate !== false,
+      showCashier: fieldsRaw.showCashier !== false,
+      showPaymentType: fieldsRaw.showPaymentType !== false,
+      showCustomer: fieldsRaw.showCustomer !== false,
+      showItemsTable: fieldsRaw.showItemsTable !== false,
+      showItemUnitPrice: fieldsRaw.showItemUnitPrice !== false,
+      showItemLineTotal: fieldsRaw.showItemLineTotal !== false,
+      showTotal: fieldsRaw.showTotal !== false,
+      showFooter: fieldsRaw.showFooter !== false
+    }
   };
   await settings.save();
 
