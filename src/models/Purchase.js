@@ -3,11 +3,11 @@ import mongoose from "mongoose";
 const purchaseSchema = new mongoose.Schema(
   {
     tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Tenant", required: true, index: true },
-    entryType: { type: String, enum: ["initial", "restock"], default: "initial" },
+    entryType: { type: String, enum: ["initial", "restock", "opening_balance"], default: "initial" },
     supplierId: { type: mongoose.Schema.Types.ObjectId, ref: "Supplier", required: true },
-    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", default: null },
     productName: { type: String, required: true, trim: true },
-    productModel: { type: String, required: true, trim: true },
+    productModel: { type: String, required: true, trim: true, default: "-" },
     quantity: { type: Number, required: true, min: 0 },
     unit: { type: String, required: true, trim: true },
     purchasePrice: { type: Number, required: true, min: 0 },

@@ -20,11 +20,22 @@ function normalizeItems(rawItems) {
   for (const it of rawItems) {
     const productId = String(it?.productId || "").trim();
     const quantity = Number(it?.quantity);
+    const priceType = String(it?.priceType || "retail").trim().toLowerCase();
+    const unitPrice = Number(it?.unitPrice);
     if (!productId || !Number.isFinite(quantity) || quantity <= 0) continue;
-    merged.set(productId, roundMoney((merged.get(productId) || 0) + quantity));
+    const normalizedPriceType = priceType === "wholesale" ? "wholesale" : "retail";
+    const safeUnitPrice = Number.isFinite(unitPrice) && unitPrice >= 0 ? roundMoney(unitPrice) : null;
+    const key = `${productId}:${normalizedPriceType}:${safeUnitPrice ?? "auto"}`;
+    const prev = merged.get(key) || { productId, quantity: 0, priceType: normalizedPriceType, unitPrice: safeUnitPrice };
+    merged.set(key, {
+      productId,
+      priceType: normalizedPriceType,
+      unitPrice: safeUnitPrice,
+      quantity: roundMoney(prev.quantity + quantity)
+    });
   }
 
-  return [...merged.entries()].map(([productId, quantity]) => ({ productId, quantity }));
+  return [...merged.values()];
 }
 
 function normalizePayments(raw) {
@@ -126,7 +137,7 @@ router.get("/", authMiddleware, async (req, res) => {
   const period = String(req.query?.period || "").toLowerCase();
   const from = String(req.query?.from || "");
   const to = String(req.query?.to || "");
-  const query = tenantFilter(req);
+  const query = tenantFilter(req, { entryType: { $ne: "opening_balance" } });
   const createdAtRange = buildDateRangeQuery({ period, from, to });
   if (createdAtRange) {
     query.createdAt = createdAtRange;
@@ -306,7 +317,7 @@ router.post("/", authMiddleware, async (req, res) => {
 
   const productIds = items.map((it) => it.productId);
   const products = await Product.find(tenantFilter(req, { _id: { $in: productIds } }))
-    .select("_id name model unit quantity retailPrice purchasePrice")
+    .select("_id name model unit quantity retailPrice wholesalePrice purchasePrice")
     .lean();
 
   if (products.length !== items.length) {
@@ -329,7 +340,12 @@ router.post("/", authMiddleware, async (req, res) => {
       });
     }
 
-    const unitPrice = Number(product.retailPrice) || 0;
+    const defaultUnitPrice = reqItem.priceType === "wholesale"
+      ? Number(product.wholesalePrice || 0)
+      : Number(product.retailPrice || 0);
+    const unitPrice = Number.isFinite(reqItem.unitPrice) && reqItem.unitPrice >= 0
+      ? Number(reqItem.unitPrice)
+      : defaultUnitPrice;
     const costPrice = Number(product.purchasePrice) || 0;
     const lineTotal = roundMoney(unitPrice * reqItem.quantity);
     const lineProfit = roundMoney((unitPrice - costPrice) * reqItem.quantity);
@@ -338,6 +354,7 @@ router.post("/", authMiddleware, async (req, res) => {
       productName: product.name,
       productModel: product.model || "",
       unit: product.unit,
+      priceType: reqItem.priceType === "wholesale" ? "wholesale" : "retail",
       quantity: reqItem.quantity,
       unitPrice,
       lineTotal,
