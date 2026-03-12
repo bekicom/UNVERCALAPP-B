@@ -589,6 +589,7 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
   sale.returnedPayments.click = roundMoney(Number(sale.returnedPayments?.click || 0) + refundPayments.click);
 
   sale.returns.push({
+    tenantId: req.user.tenantId,
     cashierId: req.user.id,
     cashierUsername: req.user.username,
     paymentType,
