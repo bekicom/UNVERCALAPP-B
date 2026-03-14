@@ -45,6 +45,28 @@ async function backfillTenantId(defaultTenantId) {
     SupplierPayment.updateMany(missing, setTenant),
     AppSettings.updateMany(missing, setTenant)
   ]);
+
+  await Sale.updateMany(
+    { returns: { $elemMatch: { $or: [{ tenantId: { $exists: false } }, { tenantId: null }] } } },
+    [
+      {
+        $set: {
+          returns: {
+            $map: {
+              input: { $ifNull: ["$returns", []] },
+              as: "ret",
+              in: {
+                $mergeObjects: [
+                  { tenantId: "$tenantId" },
+                  "$$ret"
+                ]
+              }
+            }
+          }
+        }
+      }
+    ]
+  );
 }
 
 async function dropLegacyUniqueIndexes() {

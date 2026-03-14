@@ -82,4 +82,15 @@ const saleSchema = new mongoose.Schema(
 
 saleSchema.index({ tenantId: 1, createdAt: -1 });
 
+saleSchema.pre("validate", function propagateTenantId(next) {
+  if (this.tenantId && Array.isArray(this.returns) && this.returns.length > 0) {
+    for (const ret of this.returns) {
+      if (ret && !ret.tenantId) {
+        ret.tenantId = this.tenantId;
+      }
+    }
+  }
+  next();
+});
+
 export const Sale = mongoose.model("Sale", saleSchema);
