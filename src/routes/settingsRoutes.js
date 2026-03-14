@@ -17,6 +17,12 @@ async function getOrCreateSettings(tenantId) {
     settings = await AppSettings.create({ tenantId });
   } else if (!Number.isFinite(Number(settings.usdRate)) || Number(settings.usdRate) <= 0) {
     settings.usdRate = 12171;
+    if (!["uzs", "usd"].includes(String(settings.displayCurrency || "").toLowerCase())) {
+      settings.displayCurrency = "uzs";
+    }
+    await settings.save();
+  } else if (!["uzs", "usd"].includes(String(settings.displayCurrency || "").toLowerCase())) {
+    settings.displayCurrency = "uzs";
     await settings.save();
   }
   return settings;
@@ -30,6 +36,7 @@ router.get("/", authMiddleware, async (req, res) => {
 router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   const lowStockThreshold = Number(req.body?.lowStockThreshold);
   const usdRate = Number(req.body?.usdRate);
+  const displayCurrency = String(req.body?.displayCurrency || "uzs").trim().toLowerCase();
   const keyboardEnabled = Boolean(req.body?.keyboardEnabled);
   const title = String(req.body?.receipt?.title || "").trim();
   const footer = String(req.body?.receipt?.footer || "").trim();
@@ -42,10 +49,14 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   if (!Number.isFinite(usdRate) || usdRate <= 0) {
     return res.status(400).json({ message: "USD kursi noto'g'ri" });
   }
+  if (!["uzs", "usd"].includes(displayCurrency)) {
+    return res.status(400).json({ message: "Dastur valyutasi noto'g'ri" });
+  }
 
   const settings = await getOrCreateSettings(req.user.tenantId);
   settings.lowStockThreshold = lowStockThreshold;
   settings.usdRate = usdRate;
+  settings.displayCurrency = displayCurrency;
   settings.keyboardEnabled = keyboardEnabled;
   settings.receipt = {
     title: title || "CHEK",

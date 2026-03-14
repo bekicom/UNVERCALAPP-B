@@ -23,6 +23,26 @@ router.post("/", authMiddleware, async (req, res) => {
   res.status(201).json({ category });
 });
 
+router.put("/:id", authMiddleware, async (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  if (!name) return res.status(400).json({ message: "Kategoriya nomi kerak" });
+
+  const duplicate = await Category.exists(tenantFilter(req, {
+    _id: { $ne: req.params.id },
+    name: { $regex: `^${escapeRegex(name)}$`, $options: "i" }
+  }));
+  if (duplicate) return res.status(409).json({ message: "Bu kategoriya mavjud" });
+
+  const updated = await Category.findOneAndUpdate(
+    tenantFilter(req, { _id: req.params.id }),
+    { name },
+    { new: true, runValidators: true }
+  );
+  if (!updated) return res.status(404).json({ message: "Kategoriya topilmadi" });
+
+  res.json({ category: updated });
+});
+
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
   const used = await Product.exists(tenantFilter(req, { categoryId: id }));

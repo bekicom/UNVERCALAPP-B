@@ -51,8 +51,10 @@ const saleReturnSchema = new mongoose.Schema(
 
 const saleSchema = new mongoose.Schema(
   {
+    tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Tenant", required: true, index: true },
     cashierId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     cashierUsername: { type: String, required: true, trim: true },
+    entryType: { type: String, enum: ["sale", "opening_balance"], required: true, default: "sale" },
     items: { type: [saleItemSchema], required: true, default: [] },
     totalAmount: { type: Number, required: true, min: 0 },
     paymentType: { type: String, enum: ["cash", "card", "click", "mixed", "debt"], required: true },

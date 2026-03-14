@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { authMiddleware } from "../authMiddleware.js";
+import { AppSettings } from "../models/AppSettings.js";
 import { Customer } from "../models/Customer.js";
 import { CustomerPayment } from "../models/CustomerPayment.js";
 import { Sale } from "../models/Sale.js";
@@ -10,6 +11,18 @@ const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 function roundMoney(value) {
   return Math.round(Number(value) * 100) / 100;
+}
+
+async function getUsdRate(tenantId) {
+  const settings = await AppSettings.findOne({ tenantId }).lean();
+  const rate = Number(settings?.usdRate || 0);
+  return Number.isFinite(rate) && rate > 0 ? rate : 12171;
+}
+
+function convertToUzs(value, currency, usdRate) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) return NaN;
+  return currency === "usd" ? roundMoney(amount * usdRate) : roundMoney(amount);
 }
 
 function requireAdmin(req, res, next) {
@@ -77,6 +90,112 @@ router.get("/:id/ledger", authMiddleware, requireAdmin, async (req, res) => {
   };
 
   res.json({ customer, sales, payments, totals });
+});
+
+router.post("/", authMiddleware, requireAdmin, async (req, res) => {
+  const fullName = String(req.body?.fullName || "").trim();
+  const phone = String(req.body?.phone || "").trim();
+  const address = String(req.body?.address || "").trim();
+  const openingBalanceCurrency = String(req.body?.openingBalanceCurrency || "uzs").trim().toLowerCase();
+
+  if (!fullName || !phone || !address) {
+    return res.status(400).json({ message: "Ism-familya, telefon va manzil kerak" });
+  }
+  if (!["uzs", "usd"].includes(openingBalanceCurrency)) {
+    return res.status(400).json({ message: "Valyuta noto'g'ri" });
+  }
+
+  const exists = await Customer.exists(tenantFilter(req, { phone: { $regex: `^${escapeRegex(phone)}$`, $options: "i" } }));
+  if (exists) return res.status(409).json({ message: "Bu telefon bilan mijoz mavjud" });
+
+  const usdRate = await getUsdRate(req.user.tenantId);
+  const openingBalance = convertToUzs(req.body?.openingBalanceAmount || 0, openingBalanceCurrency, usdRate);
+  if (Number.isNaN(openingBalance)) {
+    return res.status(400).json({ message: "Boshlang'ich qarz summasi noto'g'ri" });
+  }
+
+  const customer = await Customer.create(withTenant(req, {
+    fullName,
+    phone,
+    address,
+    totalDebt: openingBalance,
+    totalPaid: 0
+  }));
+
+  if (openingBalance > 0) {
+    await Sale.create(withTenant(req, {
+      cashierId: req.user.id,
+      cashierUsername: req.user.username,
+      entryType: "opening_balance",
+      items: [],
+      totalAmount: openingBalance,
+      paymentType: "debt",
+      payments: { cash: 0, card: 0, click: 0 },
+      note: "Boshlang'ich qarzdorlik",
+      customerId: customer._id,
+      customerName: customer.fullName,
+      customerPhone: customer.phone,
+      customerAddress: customer.address,
+      debtAmount: openingBalance
+    }));
+  }
+
+  res.status(201).json({ customer });
+});
+
+router.put("/:id", authMiddleware, requireAdmin, async (req, res) => {
+  const customer = await Customer.findOne(tenantFilter(req, { _id: req.params.id }));
+  if (!customer) return res.status(404).json({ message: "Mijoz topilmadi" });
+
+  const fullName = String(req.body?.fullName || "").trim();
+  const phone = String(req.body?.phone || "").trim();
+  const address = String(req.body?.address || "").trim();
+  const openingBalanceCurrency = String(req.body?.openingBalanceCurrency || "uzs").trim().toLowerCase();
+
+  if (!fullName || !phone || !address) {
+    return res.status(400).json({ message: "Ism-familya, telefon va manzil kerak" });
+  }
+  if (!["uzs", "usd"].includes(openingBalanceCurrency)) {
+    return res.status(400).json({ message: "Valyuta noto'g'ri" });
+  }
+
+  const duplicate = await Customer.exists(tenantFilter(req, {
+    _id: { $ne: req.params.id },
+    phone: { $regex: `^${escapeRegex(phone)}$`, $options: "i" }
+  }));
+  if (duplicate) return res.status(409).json({ message: "Bu telefon bilan mijoz mavjud" });
+
+  const usdRate = await getUsdRate(req.user.tenantId);
+  const openingBalance = convertToUzs(req.body?.openingBalanceAmount || 0, openingBalanceCurrency, usdRate);
+  if (Number.isNaN(openingBalance)) {
+    return res.status(400).json({ message: "Boshlang'ich qarz summasi noto'g'ri" });
+  }
+
+  customer.fullName = fullName;
+  customer.phone = phone;
+  customer.address = address;
+  customer.totalDebt = roundMoney(Number(customer.totalDebt || 0) + openingBalance);
+  await customer.save();
+
+  if (openingBalance > 0) {
+    await Sale.create(withTenant(req, {
+      cashierId: req.user.id,
+      cashierUsername: req.user.username,
+      entryType: "opening_balance",
+      items: [],
+      totalAmount: openingBalance,
+      paymentType: "debt",
+      payments: { cash: 0, card: 0, click: 0 },
+      note: "Boshlang'ich qarzdorlik qo'shildi",
+      customerId: customer._id,
+      customerName: customer.fullName,
+      customerPhone: customer.phone,
+      customerAddress: customer.address,
+      debtAmount: openingBalance
+    }));
+  }
+
+  res.json({ customer });
 });
 
 router.post("/:id/payments", authMiddleware, requireAdmin, async (req, res) => {
