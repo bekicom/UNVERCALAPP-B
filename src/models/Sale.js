@@ -75,6 +75,12 @@ const saleSchema = new mongoose.Schema(
     customerName: { type: String, trim: true, default: "" },
     customerPhone: { type: String, trim: true, default: "" },
     customerAddress: { type: String, trim: true, default: "" },
+    masterId: { type: mongoose.Schema.Types.ObjectId, ref: "Master", default: null },
+    masterName: { type: String, trim: true, default: "" },
+    masterPhone: { type: String, trim: true, default: "" },
+    vehicleId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    vehiclePlate: { type: String, trim: true, default: "" },
+    vehicleModel: { type: String, trim: true, default: "" },
     debtAmount: { type: Number, required: true, min: 0, default: 0 }
   },
   { timestamps: true }

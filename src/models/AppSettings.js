@@ -7,6 +7,7 @@ const appSettingsSchema = new mongoose.Schema(
     usdRate: { type: Number, required: true, min: 1, default: 12171 },
     displayCurrency: { type: String, enum: ["uzs", "usd"], required: true, default: "uzs" },
     keyboardEnabled: { type: Boolean, required: true, default: true },
+    ustalarEnabled: { type: Boolean, required: true, default: false },
     receipt: {
       title: { type: String, trim: true, default: "CHEK" },
       footer: { type: String, trim: true, default: "Xaridingiz uchun rahmat!" },

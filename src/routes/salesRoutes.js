@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authMiddleware } from "../authMiddleware.js";
 import { Customer } from "../models/Customer.js";
 import { CustomerPayment } from "../models/CustomerPayment.js";
+import { Master } from "../models/Master.js";
 import { Product } from "../models/Product.js";
 import { Sale } from "../models/Sale.js";
 import { tenantFilter, withTenant } from "../tenant.js";
@@ -52,6 +53,81 @@ function sumPayments(payments) {
 
 function isPositiveNumber(value) {
   return Number.isFinite(value) && value > 0;
+}
+
+function normalizePlate(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+}
+
+async function resolveMasterSale(req, rawMaster = {}) {
+  const fullName = String(rawMaster?.fullName || "").trim();
+  const phone = String(rawMaster?.phone || "").trim();
+  const vehiclePlate = normalizePlate(rawMaster?.vehiclePlate);
+  const vehicleModel = String(rawMaster?.vehicleModel || "").trim();
+  const masterId = String(rawMaster?.id || "").trim();
+  const vehicleId = String(rawMaster?.vehicleId || "").trim();
+
+  if (!fullName || !vehiclePlate) {
+    return { error: "Usta ismi va mashina raqami kerak" };
+  }
+
+  let master = null;
+  if (masterId) {
+    master = await Master.findOne(tenantFilter(req, { _id: masterId }));
+  }
+
+  if (!master) {
+    master = await Master.findOne(tenantFilter(req, {
+      $or: [
+        { "vehicles.plateNumber": vehiclePlate },
+        { fullName, phone }
+      ]
+    }));
+  }
+
+  if (!master) {
+    master = await Master.create(withTenant(req, {
+      fullName,
+      phone,
+      vehicles: [{
+        plateNumber: vehiclePlate,
+        model: vehicleModel
+      }]
+    }));
+  } else {
+    if (phone && !master.phone) {
+      master.phone = phone;
+    }
+    if (fullName && master.fullName !== fullName) {
+      master.fullName = fullName;
+    }
+  }
+
+  let vehicle = null;
+  if (vehicleId) {
+    vehicle = master.vehicles.id(vehicleId);
+  }
+  if (!vehicle) {
+    vehicle = master.vehicles.find((entry) => normalizePlate(entry.plateNumber) === vehiclePlate) || null;
+  }
+  if (!vehicle) {
+    master.vehicles.push({
+      plateNumber: vehiclePlate,
+      model: vehicleModel
+    });
+    vehicle = master.vehicles[master.vehicles.length - 1];
+  } else if (vehicleModel && !String(vehicle.model || "").trim()) {
+    vehicle.model = vehicleModel;
+  }
+
+  await master.save();
+  return {
+    master,
+    vehicle
+  };
 }
 
 function allocateByAvailability(total, available) {
@@ -302,6 +378,7 @@ router.post("/", authMiddleware, async (req, res) => {
   const items = normalizeItems(req.body?.items);
   const paymentType = String(req.body?.paymentType || "").trim().toLowerCase();
   const note = String(req.body?.note || "").trim();
+  const masterInput = req.body?.master || null;
   const customerInput = {
     fullName: String(req.body?.customer?.fullName || "").trim(),
     phone: String(req.body?.customer?.phone || "").trim(),
@@ -366,6 +443,14 @@ router.post("/", authMiddleware, async (req, res) => {
   const totalAmount = roundMoney(saleItems.reduce((sum, it) => sum + it.lineTotal, 0));
   const payments = normalizePayments(req.body?.payments);
   let customer = null;
+  let masterSale = null;
+
+  if (masterInput?.fullName || masterInput?.vehiclePlate) {
+    masterSale = await resolveMasterSale(req, masterInput);
+    if (masterSale?.error) {
+      return res.status(400).json({ message: masterSale.error });
+    }
+  }
 
   if (paymentType === "cash") {
     payments.cash = totalAmount;
@@ -380,23 +465,25 @@ router.post("/", authMiddleware, async (req, res) => {
     payments.card = 0;
     payments.click = totalAmount;
   } else if (paymentType === "debt") {
-    if (!customerInput.fullName || !customerInput.phone || !customerInput.address) {
-      return res.status(400).json({ message: "Qarzga sotuv uchun mijoz ismi, telefoni va manzili kerak" });
-    }
+    if (!masterSale) {
+      if (!customerInput.fullName || !customerInput.phone || !customerInput.address) {
+        return res.status(400).json({ message: "Qarzga sotuv uchun mijoz ismi, telefoni va manzili kerak" });
+      }
 
-    customer = await Customer.findOne(tenantFilter(req, { phone: customerInput.phone }));
-    if (!customer) {
-      customer = await Customer.create(withTenant(req, {
-        fullName: customerInput.fullName,
-        phone: customerInput.phone,
-        address: customerInput.address,
-        totalDebt: 0,
-        totalPaid: 0
-      }));
-    } else {
-      customer.fullName = customerInput.fullName;
-      customer.address = customerInput.address;
-      await customer.save();
+      customer = await Customer.findOne(tenantFilter(req, { phone: customerInput.phone }));
+      if (!customer) {
+        customer = await Customer.create(withTenant(req, {
+          fullName: customerInput.fullName,
+          phone: customerInput.phone,
+          address: customerInput.address,
+          totalDebt: 0,
+          totalPaid: 0
+        }));
+      } else {
+        customer.fullName = customerInput.fullName;
+        customer.address = customerInput.address;
+        await customer.save();
+      }
     }
 
     payments.cash = 0;
@@ -437,12 +524,29 @@ router.post("/", authMiddleware, async (req, res) => {
     customerName: customer?.fullName || "",
     customerPhone: customer?.phone || "",
     customerAddress: customer?.address || "",
+    masterId: masterSale?.master?._id || null,
+    masterName: masterSale?.master?.fullName || "",
+    masterPhone: masterSale?.master?.phone || "",
+    vehicleId: masterSale?.vehicle?._id || null,
+    vehiclePlate: masterSale?.vehicle?.plateNumber || "",
+    vehicleModel: masterSale?.vehicle?.model || "",
     debtAmount: paymentType === "debt" ? totalAmount : 0
   }));
 
   if (customer) {
     customer.totalDebt = roundMoney(Number(customer.totalDebt || 0) + totalAmount);
     await customer.save();
+  }
+
+  if (masterSale?.master && masterSale?.vehicle) {
+    const vehicle = masterSale.master.vehicles.id(masterSale.vehicle._id);
+    if (vehicle) {
+      if (paymentType === "debt") {
+        vehicle.totalDebt = roundMoney(Number(vehicle.totalDebt || 0) + totalAmount);
+      }
+      vehicle.lastSaleAt = new Date();
+      await masterSale.master.save();
+    }
   }
 
   return res.status(201).json({ sale });
@@ -576,6 +680,20 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
         customer.totalPaid = roundMoney(Math.max(0, Number(customer.totalPaid || 0) - refundedPaid));
       }
       await customer.save();
+    }
+  }
+
+  if (sale.masterId && sale.vehicleId) {
+    const master = await Master.findOne(tenantFilter(req, { _id: sale.masterId }));
+    const vehicle = master?.vehicles?.id?.(sale.vehicleId) || null;
+    if (vehicle) {
+      if (paymentType === "debt") {
+        vehicle.totalDebt = roundMoney(Math.max(0, Number(vehicle.totalDebt || 0) - returnTotal));
+      } else {
+        const refundedPaid = sumPayments(refundPayments);
+        vehicle.totalPaid = roundMoney(Math.max(0, Number(vehicle.totalPaid || 0) - refundedPaid));
+      }
+      await master.save();
     }
   }
 

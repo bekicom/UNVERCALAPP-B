@@ -38,6 +38,7 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   const usdRate = Number(req.body?.usdRate);
   const displayCurrency = String(req.body?.displayCurrency || "uzs").trim().toLowerCase();
   const keyboardEnabled = Boolean(req.body?.keyboardEnabled);
+  const ustalarEnabled = Boolean(req.body?.ustalarEnabled);
   const title = String(req.body?.receipt?.title || "").trim();
   const footer = String(req.body?.receipt?.footer || "").trim();
   const logoUrl = String(req.body?.receipt?.logoUrl || "").trim();
@@ -58,6 +59,7 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
   settings.usdRate = usdRate;
   settings.displayCurrency = displayCurrency;
   settings.keyboardEnabled = keyboardEnabled;
+  settings.ustalarEnabled = ustalarEnabled;
   settings.receipt = {
     title: title || "CHEK",
     footer: footer || "Xaridingiz uchun rahmat!",

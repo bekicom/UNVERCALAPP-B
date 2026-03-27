@@ -11,6 +11,7 @@ import supplierRoutes from "./routes/supplierRoutes.js";
 import expenseRoutes from "./routes/expenseRoutes.js";
 import salesRoutes from "./routes/salesRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
+import masterRoutes from "./routes/masterRoutes.js";
 import settingsRoutes from "./routes/settingsRoutes.js";
 import { startSuperAdminBot } from "./bot/superAdminBot.js";
 
@@ -34,6 +35,7 @@ app.use("/api/suppliers", supplierRoutes);
 app.use("/api/expenses", expenseRoutes);
 app.use("/api/sales", salesRoutes);
 app.use("/api/customers", customerRoutes);
+app.use("/api/masters", masterRoutes);
 app.use("/api/settings", settingsRoutes);
 
 initDb().then(() => {
