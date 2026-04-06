@@ -5,9 +5,14 @@ const saleItemSchema = new mongoose.Schema(
     productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
     productName: { type: String, required: true, trim: true },
     productModel: { type: String, default: "", trim: true },
+    categoryName: { type: String, default: "", trim: true },
+    barcode: { type: String, default: "", trim: true },
     unit: { type: String, required: true, trim: true },
+    variantSize: { type: String, default: "", trim: true },
+    variantColor: { type: String, default: "", trim: true },
     quantity: { type: Number, required: true, min: 0 },
     returnedQuantity: { type: Number, required: true, min: 0, default: 0 },
+    priceType: { type: String, enum: ["retail", "wholesale"], default: "retail" },
     unitPrice: { type: Number, required: true, min: 0 },
     lineTotal: { type: Number, required: true, min: 0 },
     returnedTotal: { type: Number, required: true, min: 0, default: 0 },
@@ -22,7 +27,10 @@ const saleReturnItemSchema = new mongoose.Schema(
   {
     productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
     productName: { type: String, required: true, trim: true },
+    barcode: { type: String, default: "", trim: true },
     unit: { type: String, required: true, trim: true },
+    variantSize: { type: String, default: "", trim: true },
+    variantColor: { type: String, default: "", trim: true },
     quantity: { type: Number, required: true, min: 0 },
     unitPrice: { type: Number, required: true, min: 0 },
     lineTotal: { type: Number, required: true, min: 0 },
@@ -81,7 +89,10 @@ const saleSchema = new mongoose.Schema(
     vehicleId: { type: mongoose.Schema.Types.ObjectId, default: null },
     vehiclePlate: { type: String, trim: true, default: "" },
     vehicleModel: { type: String, trim: true, default: "" },
-    debtAmount: { type: Number, required: true, min: 0, default: 0 }
+    debtAmount: { type: Number, required: true, min: 0, default: 0 },
+    shiftId: { type: mongoose.Schema.Types.ObjectId, ref: "Shift", default: null, index: true },
+    shiftNumber: { type: Number, min: 1, default: null },
+    shiftOpenedAt: { type: Date, default: null }
   },
   { timestamps: true }
 );

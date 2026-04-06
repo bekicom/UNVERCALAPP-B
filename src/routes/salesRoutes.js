@@ -5,6 +5,7 @@ import { CustomerPayment } from "../models/CustomerPayment.js";
 import { Master } from "../models/Master.js";
 import { Product } from "../models/Product.js";
 import { Sale } from "../models/Sale.js";
+import { Shift } from "../models/Shift.js";
 import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
@@ -23,15 +24,26 @@ function normalizeItems(rawItems) {
     const quantity = Number(it?.quantity);
     const priceType = String(it?.priceType || "retail").trim().toLowerCase();
     const unitPrice = Number(it?.unitPrice);
+    const variantSize = String(it?.variantSize || "").trim();
+    const variantColor = String(it?.variantColor || "").trim();
     if (!productId || !Number.isFinite(quantity) || quantity <= 0) continue;
     const normalizedPriceType = priceType === "wholesale" ? "wholesale" : "retail";
     const safeUnitPrice = Number.isFinite(unitPrice) && unitPrice >= 0 ? roundMoney(unitPrice) : null;
-    const key = `${productId}:${normalizedPriceType}:${safeUnitPrice ?? "auto"}`;
-    const prev = merged.get(key) || { productId, quantity: 0, priceType: normalizedPriceType, unitPrice: safeUnitPrice };
+    const key = `${productId}:${normalizedPriceType}:${safeUnitPrice ?? "auto"}:${variantSize}:${variantColor}`;
+    const prev = merged.get(key) || {
+      productId,
+      quantity: 0,
+      priceType: normalizedPriceType,
+      unitPrice: safeUnitPrice,
+      variantSize,
+      variantColor
+    };
     merged.set(key, {
       productId,
       priceType: normalizedPriceType,
       unitPrice: safeUnitPrice,
+      variantSize,
+      variantColor,
       quantity: roundMoney(prev.quantity + quantity)
     });
   }
@@ -204,6 +216,141 @@ function buildDateRangeQuery({ period, from, to }) {
   return query;
 }
 
+router.get("/variant-insights", authMiddleware, async (req, res) => {
+  const period = String(req.query?.period || "").toLowerCase();
+  const from = String(req.query?.from || "");
+  const to = String(req.query?.to || "");
+  const cashierUsername = String(req.query?.cashierUsername || "").trim();
+  const shiftId = String(req.query?.shiftId || "").trim();
+  const size = String(req.query?.size || "").trim();
+  const color = String(req.query?.color || "").trim();
+
+  const match = tenantFilter(req, { entryType: { $ne: "opening_balance" } });
+  const createdAtRange = buildDateRangeQuery({ period, from, to });
+  if (createdAtRange) {
+    match.createdAt = createdAtRange;
+  }
+  if (cashierUsername) {
+    match.cashierUsername = cashierUsername;
+  }
+  if (shiftId) {
+    match.shiftId = shiftId;
+  }
+
+  const pipeline = [
+    { $match: match },
+    { $unwind: "$items" },
+    {
+      $match: {
+        $or: [
+          { "items.variantSize": { $exists: true, $ne: "" } },
+          { "items.variantColor": { $exists: true, $ne: "" } }
+        ]
+      }
+    }
+  ];
+
+  if (size) {
+    pipeline.push({ $match: { "items.variantSize": size } });
+  }
+  if (color) {
+    pipeline.push({ $match: { "items.variantColor": color } });
+  }
+
+  pipeline.push(
+    {
+      $group: {
+        _id: {
+          productId: "$items.productId",
+          productName: "$items.productName",
+          size: "$items.variantSize",
+          color: "$items.variantColor"
+        },
+        quantity: { $sum: { $subtract: ["$items.quantity", "$items.returnedQuantity"] } },
+        revenue: {
+          $sum: {
+            $subtract: ["$items.lineTotal", "$items.returnedTotal"]
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        _id: 0,
+        productId: "$_id.productId",
+        productName: "$_id.productName",
+        size: "$_id.size",
+        color: "$_id.color",
+        quantity: { $round: ["$quantity", 2] },
+        revenue: { $round: ["$revenue", 2] }
+      }
+    },
+    { $sort: { quantity: -1, revenue: -1, productName: 1 } }
+  );
+
+  const rows = await Sale.aggregate(pipeline);
+  const positiveRows = rows.filter(
+    (row) => Number(row.quantity || 0) > 0.0001 || Number(row.revenue || 0) > 0.0001
+  );
+  const availableSizes = [...new Set(positiveRows.map((row) => String(row.size || "").trim()).filter(Boolean))].sort(
+    (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })
+  );
+  const availableColors = [...new Set(positiveRows.map((row) => String(row.color || "").trim()).filter(Boolean))].sort(
+    (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
+  );
+
+  const byProduct = new Map();
+  const bySize = new Map();
+  const byColor = new Map();
+  let totalQuantity = 0;
+  let totalRevenue = 0;
+
+  for (const row of positiveRows) {
+    const qty = Number(row.quantity || 0);
+    const revenue = Number(row.revenue || 0);
+    totalQuantity += qty;
+    totalRevenue += revenue;
+
+    const productName = String(row.productName || "").trim() || "-";
+    byProduct.set(productName, roundMoney((byProduct.get(productName) || 0) + qty));
+
+    const sizeKey = String(row.size || "").trim();
+    if (sizeKey) {
+      bySize.set(sizeKey, roundMoney((bySize.get(sizeKey) || 0) + qty));
+    }
+
+    const colorKey = String(row.color || "").trim();
+    if (colorKey) {
+      byColor.set(colorKey, roundMoney((byColor.get(colorKey) || 0) + qty));
+    }
+  }
+
+  function topLabel(map) {
+    let bestLabel = "";
+    let bestValue = 0;
+    for (const [label, value] of map.entries()) {
+      if (Number(value) > bestValue) {
+        bestLabel = label;
+        bestValue = Number(value);
+      }
+    }
+    return { label: bestLabel, quantity: roundMoney(bestValue) };
+  }
+
+  return res.json({
+    summary: {
+      totalQuantity: roundMoney(totalQuantity),
+      totalRevenue: roundMoney(totalRevenue),
+      topProduct: topLabel(byProduct),
+      topSize: topLabel(bySize),
+      topColor: topLabel(byColor)
+    },
+    availableSizes,
+    availableColors,
+    rows: positiveRows.slice(0, 50)
+  });
+});
+
 router.get("/", authMiddleware, async (req, res) => {
   const limitRaw = Number(req.query?.limit);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0
@@ -213,15 +360,26 @@ router.get("/", authMiddleware, async (req, res) => {
   const period = String(req.query?.period || "").toLowerCase();
   const from = String(req.query?.from || "");
   const to = String(req.query?.to || "");
+  const cashierUsername = String(req.query?.cashierUsername || "").trim();
+  const shiftId = String(req.query?.shiftId || "").trim();
   const query = tenantFilter(req, { entryType: { $ne: "opening_balance" } });
   const createdAtRange = buildDateRangeQuery({ period, from, to });
   if (createdAtRange) {
     query.createdAt = createdAtRange;
   }
+  if (cashierUsername) {
+    query.cashierUsername = cashierUsername;
+  }
+  if (shiftId) {
+    query.shiftId = shiftId;
+  }
 
   const paymentQuery = tenantFilter(req);
   if (createdAtRange) {
     paymentQuery.paidAt = createdAtRange;
+  }
+  if (cashierUsername) {
+    paymentQuery.cashierUsername = cashierUsername;
   }
 
   const [saleDocs, paymentDocs] = await Promise.all([
@@ -241,7 +399,9 @@ router.get("/", authMiddleware, async (req, res) => {
     transactionType: "sale"
   }));
 
-  const paymentEntries = paymentDocs.map((payment) => ({
+  const paymentEntries = shiftId
+    ? []
+    : paymentDocs.map((payment) => ({
     _id: `payment-${String(payment._id)}`,
     transactionType: "debt_payment",
     createdAt: payment.paidAt || payment.createdAt,
@@ -392,12 +552,13 @@ router.post("/", authMiddleware, async (req, res) => {
     return res.status(400).json({ message: "To'lov turi noto'g'ri" });
   }
 
-  const productIds = items.map((it) => it.productId);
+  const productIds = [...new Set(items.map((it) => it.productId))];
   const products = await Product.find(tenantFilter(req, { _id: { $in: productIds } }))
-    .select("_id name model unit quantity retailPrice wholesalePrice purchasePrice")
+    .select("_id name model barcode unit quantity variantStocks retailPrice wholesalePrice purchasePrice")
+    .populate({ path: "categoryId", select: "name" })
     .lean();
 
-  if (products.length !== items.length) {
+  if (products.length !== productIds.length) {
     return res.status(400).json({ message: "Ba'zi mahsulotlar topilmadi" });
   }
 
@@ -411,9 +572,29 @@ router.post("/", authMiddleware, async (req, res) => {
     }
 
     const currentQty = Number(product.quantity) || 0;
-    if (reqItem.quantity > currentQty) {
+    let currentVariantQty = currentQty;
+    let variantSize = "";
+    let variantColor = "";
+
+    if (product.unit === "razmer" && Array.isArray(product.variantStocks) && product.variantStocks.length > 0) {
+      variantSize = String(reqItem.variantSize || "").trim();
+      variantColor = String(reqItem.variantColor || "").trim();
+      if (!variantSize || !variantColor) {
+        return res.status(400).json({ message: `${product.name} uchun razmer va rang tanlang` });
+      }
+      const variant = product.variantStocks.find(
+        (it) => String(it?.size || "").trim() === variantSize && String(it?.color || "").trim() === variantColor
+      );
+      if (!variant) {
+        return res.status(409).json({ message: `${product.name} uchun tanlangan variant topilmadi` });
+      }
+      currentVariantQty = Number(variant.quantity) || 0;
+    }
+
+    const safeAvailableQty = product.unit === "razmer" ? currentVariantQty : currentQty;
+    if (reqItem.quantity > safeAvailableQty) {
       return res.status(409).json({
-        message: `${product.name} uchun qoldiq yetarli emas (${currentQty})`
+        message: `${product.name} uchun qoldiq yetarli emas (${safeAvailableQty})`
       });
     }
 
@@ -430,7 +611,11 @@ router.post("/", authMiddleware, async (req, res) => {
       productId: product._id,
       productName: product.name,
       productModel: product.model || "",
+      categoryName: product.categoryId?.name || "",
+      barcode: product.barcode || "",
       unit: product.unit,
+      variantSize,
+      variantColor,
       priceType: reqItem.priceType === "wholesale" ? "wholesale" : "retail",
       quantity: reqItem.quantity,
       unitPrice,
@@ -444,6 +629,13 @@ router.post("/", authMiddleware, async (req, res) => {
   const payments = normalizePayments(req.body?.payments);
   let customer = null;
   let masterSale = null;
+  const activeShift = await Shift.findOne(
+    tenantFilter(req, { cashierId: req.user.id, status: "open" })
+  ).sort({ openedAt: -1 });
+
+  if (req.user?.role === "cashier" && !activeShift) {
+    return res.status(409).json({ message: "Avval smenani boshlang" });
+  }
 
   if (masterInput?.fullName || masterInput?.vehiclePlate) {
     masterSale = await resolveMasterSale(req, masterInput);
@@ -498,18 +690,49 @@ router.post("/", authMiddleware, async (req, res) => {
 
   const applied = [];
   for (const item of saleItems) {
-    const updated = await Product.updateOne(
-      tenantFilter(req, { _id: item.productId, quantity: { $gte: item.quantity } }),
-      { $inc: { quantity: -item.quantity } }
-    );
+    const updateQuery = item.variantSize && item.variantColor
+      ? tenantFilter(req, {
+        _id: item.productId,
+        quantity: { $gte: item.quantity },
+        variantStocks: {
+          $elemMatch: {
+            size: item.variantSize,
+            color: item.variantColor,
+            quantity: { $gte: item.quantity }
+          }
+        }
+      })
+      : tenantFilter(req, { _id: item.productId, quantity: { $gte: item.quantity } });
+    const updateBody = item.variantSize && item.variantColor
+      ? { $inc: { quantity: -item.quantity, "variantStocks.$.quantity": -item.quantity } }
+      : { $inc: { quantity: -item.quantity } };
+    const updated = await Product.updateOne(updateQuery, updateBody);
 
     if (updated.modifiedCount !== 1) {
       for (const rollback of applied) {
-        await Product.updateOne(tenantFilter(req, { _id: rollback.productId }), { $inc: { quantity: rollback.quantity } });
+        if (rollback.variantSize && rollback.variantColor) {
+          await Product.updateOne(
+            tenantFilter(req, {
+              _id: rollback.productId,
+              variantStocks: { $elemMatch: { size: rollback.variantSize, color: rollback.variantColor } }
+            }),
+            { $inc: { quantity: rollback.quantity, "variantStocks.$.quantity": rollback.quantity } }
+          );
+        } else {
+          await Product.updateOne(
+            tenantFilter(req, { _id: rollback.productId }),
+            { $inc: { quantity: rollback.quantity } }
+          );
+        }
       }
       return res.status(409).json({ message: `${item.productName} qoldig'i yetarli emas` });
     }
-    applied.push({ productId: item.productId, quantity: item.quantity });
+    applied.push({
+      productId: item.productId,
+      quantity: item.quantity,
+      variantSize: item.variantSize || "",
+      variantColor: item.variantColor || ""
+    });
   }
 
   const sale = await Sale.create(withTenant(req, {
@@ -530,8 +753,24 @@ router.post("/", authMiddleware, async (req, res) => {
     vehicleId: masterSale?.vehicle?._id || null,
     vehiclePlate: masterSale?.vehicle?.plateNumber || "",
     vehicleModel: masterSale?.vehicle?.model || "",
-    debtAmount: paymentType === "debt" ? totalAmount : 0
+    debtAmount: paymentType === "debt" ? totalAmount : 0,
+    shiftId: activeShift?._id || null,
+    shiftNumber: activeShift?.shiftNumber || null,
+    shiftOpenedAt: activeShift?.openedAt || null
   }));
+
+  if (activeShift) {
+    const itemCount = saleItems.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+    activeShift.totalSalesCount = Number(activeShift.totalSalesCount || 0) + 1;
+    activeShift.totalItemsCount = roundMoney(Number(activeShift.totalItemsCount || 0) + itemCount);
+    activeShift.totalAmount = roundMoney(Number(activeShift.totalAmount || 0) + totalAmount);
+    activeShift.totalCash = roundMoney(Number(activeShift.totalCash || 0) + Number(payments.cash || 0));
+    activeShift.totalCard = roundMoney(Number(activeShift.totalCard || 0) + Number(payments.card || 0));
+    activeShift.totalClick = roundMoney(Number(activeShift.totalClick || 0) + Number(payments.click || 0));
+    activeShift.totalDebt = roundMoney(Number(activeShift.totalDebt || 0) + Number(paymentType === "debt" ? totalAmount : 0));
+    activeShift.lastSaleAt = new Date();
+    await activeShift.save();
+  }
 
   if (customer) {
     customer.totalDebt = roundMoney(Number(customer.totalDebt || 0) + totalAmount);
@@ -590,7 +829,10 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
     returnItems.push({
       productId: saleItem.productId,
       productName: saleItem.productName,
+      barcode: saleItem.barcode || "",
       unit: saleItem.unit,
+      variantSize: saleItem.variantSize || "",
+      variantColor: saleItem.variantColor || "",
       quantity: roundMoney(item.quantity),
       unitPrice,
       lineTotal,
@@ -644,17 +886,43 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
 
   const updatedStock = [];
   for (const item of returnItems) {
-    const changed = await Product.updateOne(
-      tenantFilter(req, { _id: item.productId }),
-      { $inc: { quantity: item.quantity } }
-    );
+    const changed = item.variantSize && item.variantColor
+      ? await Product.updateOne(
+        tenantFilter(req, {
+          _id: item.productId,
+          variantStocks: { $elemMatch: { size: item.variantSize, color: item.variantColor } }
+        }),
+        { $inc: { quantity: item.quantity, "variantStocks.$.quantity": item.quantity } }
+      )
+      : await Product.updateOne(
+        tenantFilter(req, { _id: item.productId }),
+        { $inc: { quantity: item.quantity } }
+      );
     if (changed.matchedCount !== 1) {
       for (const rollback of updatedStock) {
-        await Product.updateOne(tenantFilter(req, { _id: rollback.productId }), { $inc: { quantity: -rollback.quantity } });
+        if (rollback.variantSize && rollback.variantColor) {
+          await Product.updateOne(
+            tenantFilter(req, {
+              _id: rollback.productId,
+              variantStocks: { $elemMatch: { size: rollback.variantSize, color: rollback.variantColor } }
+            }),
+            { $inc: { quantity: -rollback.quantity, "variantStocks.$.quantity": -rollback.quantity } }
+          );
+        } else {
+          await Product.updateOne(
+            tenantFilter(req, { _id: rollback.productId }),
+            { $inc: { quantity: -rollback.quantity } }
+          );
+        }
       }
       return res.status(409).json({ message: `${item.productName} omborda topilmadi` });
     }
-    updatedStock.push({ productId: item.productId, quantity: item.quantity });
+    updatedStock.push({
+      productId: item.productId,
+      quantity: item.quantity,
+      variantSize: item.variantSize || "",
+      variantColor: item.variantColor || ""
+    });
   }
 
   for (const item of returnItems) {

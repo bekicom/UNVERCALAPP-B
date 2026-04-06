@@ -3,10 +3,29 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
 import { Tenant } from "../models/Tenant.js";
+import { asyncHandler } from "../asyncHandler.js";
 
 const router = Router();
+const fallbackJwtSecret = "uy_dokon_local_secret_2026";
 
-router.post("/login", async (req, res) => {
+router.get("/login-users", asyncHandler(async (_req, res) => {
+  const activeTenants = await Tenant.find({ isActive: true }).select("_id").lean();
+  const activeTenantIds = activeTenants.map((tenant) => tenant._id);
+
+  const users = await User.find({ tenantId: { $in: activeTenantIds } })
+    .select("username role createdAt")
+    .sort({ role: 1, username: 1, createdAt: 1 })
+    .lean();
+
+  return res.json({
+    users: users.map((user) => ({
+      username: user.username,
+      role: user.role
+    }))
+  });
+}));
+
+router.post("/login", asyncHandler(async (req, res) => {
   const username = String(req.body?.username || "").trim();
   const password = String(req.body?.password || "");
   const tenantSlug = String(req.body?.tenantSlug || "").trim().toLowerCase();
@@ -51,7 +70,7 @@ router.post("/login", async (req, res) => {
 
   const token = jwt.sign(
     { id: user._id, tenantId: String(user.tenantId), username: user.username, role: user.role },
-    process.env.JWT_SECRET,
+    process.env.JWT_SECRET || fallbackJwtSecret,
     { expiresIn: "12h" }
   );
 
@@ -65,6 +84,6 @@ router.post("/login", async (req, res) => {
       role: user.role
     }
   });
-});
+}));
 
 export default router;

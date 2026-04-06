@@ -17,6 +17,38 @@ import { SupplierPayment } from "./models/SupplierPayment.js";
 const defaultMongoUri = "mongodb://127.0.0.1:27017/unvercalapp";
 const allowedUnits = ["dona", "kg", "blok", "pachka", "qop"];
 
+function getDefaultAdminConfig() {
+  const username = String(process.env.ADMIN_USERNAME || "admin").trim();
+  const password = String(process.env.ADMIN_PASSWORD || "0000");
+  const role = String(process.env.ADMIN_ROLE || "admin").trim().toLowerCase();
+  return {
+    username: username || "admin",
+    password: password || "0000",
+    role: role === "cashier" ? "cashier" : "admin"
+  };
+}
+
+function generateBarcodeCandidate() {
+  const base = String(Date.now()).slice(-10);
+  const suffix = String(Math.floor(100 + Math.random() * 900));
+  return `${base}${suffix}`;
+}
+
+async function ensureProductBarcode(tenantId, currentId) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = generateBarcodeCandidate();
+    const exists = await Product.exists({
+      tenantId,
+      barcode: candidate,
+      _id: { $ne: currentId }
+    });
+    if (!exists) {
+      return candidate;
+    }
+  }
+  return generateBarcodeCandidate();
+}
+
 async function ensureDefaultTenant() {
   const slug = String(process.env.DEFAULT_TENANT_SLUG || "default").trim().toLowerCase();
   const name = String(process.env.DEFAULT_TENANT_NAME || "Default Tenant").trim();
@@ -98,14 +130,18 @@ export async function initDb() {
   await backfillTenantId(defaultTenant._id);
   await dropLegacyUniqueIndexes();
 
-  const hasAdmin = await User.exists({ tenantId: defaultTenant._id, username: "admin" });
+  const defaultAdmin = getDefaultAdminConfig();
+  const hasAdmin = await User.exists({
+    tenantId: defaultTenant._id,
+    username: defaultAdmin.username
+  });
   if (!hasAdmin) {
-    const passwordHash = bcrypt.hashSync("0000", 10);
+    const passwordHash = bcrypt.hashSync(defaultAdmin.password, 10);
     await User.create({
       tenantId: defaultTenant._id,
-      username: "admin",
+      username: defaultAdmin.username,
       passwordHash,
-      role: "admin"
+      role: defaultAdmin.role
     });
   }
 
@@ -186,6 +222,9 @@ export async function initDb() {
       }
       if (typeof p.debtAmount !== "number" || p.debtAmount < 0) {
         patch.debtAmount = 0;
+      }
+      if (!p.barcode || String(p.barcode).trim() === "") {
+        patch.barcode = await ensureProductBarcode(defaultTenant._id, p._id);
       }
 
       if (Object.keys(patch).length > 0) {
