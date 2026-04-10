@@ -108,27 +108,4 @@ router.put("/users/:id", authMiddleware, requireAdmin, async (req, res) => {
   });
 });
 
-router.delete("/users/:id", authMiddleware, requireAdmin, async (req, res) => {
-  const user = await User.findOne(tenantFilter(req, { _id: req.params.id }));
-  if (!user) {
-    return res.status(404).json({ message: "Foydalanuvchi topilmadi" });
-  }
-
-  if (String(user._id) === String(req.user?.id || "")) {
-    return res.status(400).json({ message: "O'zingizni o'chira olmaysiz" });
-  }
-
-  if (user.role === "admin") {
-    const adminCount = await User.countDocuments(
-      tenantFilter(req, { role: "admin", _id: { $ne: user._id } })
-    );
-    if (adminCount < 1) {
-      return res.status(400).json({ message: "Kamida 1 ta admin qolishi kerak" });
-    }
-  }
-
-  await User.deleteOne({ _id: user._id });
-  res.json({ ok: true });
-});
-
 export default router;

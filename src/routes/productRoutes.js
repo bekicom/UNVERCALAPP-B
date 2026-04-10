@@ -5,75 +5,14 @@ import { Category } from "../models/Category.js";
 import { Supplier } from "../models/Supplier.js";
 import { Purchase } from "../models/Purchase.js";
 import { AppSettings } from "../models/AppSettings.js";
-import { SyncTransfer } from "../models/SyncTransfer.js";
 import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
-const PRODUCT_UNITS = ["dona", "kg", "blok", "pachka", "qop", "razmer"];
-const PRODUCT_GENDERS = ["", "qiz_bola", "ogil_bola"];
+const PRODUCT_UNITS = ["dona", "kg", "blok", "pachka", "qop"];
 const PRICING_MODES = ["keep_old", "replace_all", "average"];
-
-function getCentralApiBaseUrl() {
-  return String(process.env.CENTRAL_API_BASE_URL || "").replace(/\/+$/, "");
-}
-
-function getCentralSyncUsername() {
-  return String(process.env.CENTRAL_SYNC_USERNAME || "").trim();
-}
-
-function getCentralSyncPassword() {
-  return String(process.env.CENTRAL_SYNC_PASSWORD || "").trim();
-}
-
-function getDefaultStoreCode() {
-  return String(process.env.STORE_CODE || "").trim();
-}
-
-function getDefaultStoreName() {
-  return String(process.env.STORE_NAME || "").trim().toLowerCase();
-}
 
 function roundMoney(value) {
   return Math.round(Number(value) * 100) / 100;
-}
-
-function normalizeBarcode(value) {
-  return String(value || "").replace(/\s+/g, "").trim();
-}
-
-function generateBarcodeCandidate() {
-  const base = String(Date.now()).slice(-10);
-  const suffix = String(Math.floor(100 + Math.random() * 900));
-  return `${base}${suffix}`;
-}
-
-async function ensureUniqueBarcode(tenantId, barcode, excludeId = null) {
-  const normalized = normalizeBarcode(barcode);
-  if (normalized) {
-    const duplicate = await Product.exists({
-      tenantId,
-      barcode: normalized,
-      ...(excludeId ? { _id: { $ne: excludeId } } : {})
-    });
-    if (duplicate) {
-      return { error: "Bu shtixkod allaqachon mavjud" };
-    }
-    return { barcode: normalized };
-  }
-
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const candidate = generateBarcodeCandidate();
-    const exists = await Product.exists({
-      tenantId,
-      barcode: candidate,
-      ...(excludeId ? { _id: { $ne: excludeId } } : {})
-    });
-    if (!exists) {
-      return { barcode: candidate };
-    }
-  }
-
-  return { error: "Shtixkod yaratib bo'lmadi, qayta urinib ko'ring" };
 }
 
 async function getUsdRate(tenantId) {
@@ -89,125 +28,11 @@ function convertToUzs(value, priceCurrency, usdRate) {
   return roundMoney(numeric);
 }
 
-function normalizeStringArray(value) {
-  if (!Array.isArray(value)) return [];
-  return [...new Set(value.map((item) => String(item || "").trim()).filter(Boolean))];
-}
-
-function normalizeVariantStocks(value) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => ({
-      size: String(item?.size || "").trim(),
-      color: String(item?.color || "").trim(),
-      quantity: Number(item?.quantity)
-    }))
-    .filter((item) => item.size && item.color && Number.isFinite(item.quantity) && item.quantity >= 0);
-}
-
-function centralApiUrl(path) {
-  const baseUrl = getCentralApiBaseUrl();
-  const normalized = path.startsWith("/") ? path : `/${path}`;
-  return `${baseUrl}${normalized}`;
-}
-
-async function readJsonOrThrow(response) {
-  const text = await response.text();
-  let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { message: text || "Noma'lum xato" };
-  }
-  if (!response.ok) {
-    throw new Error(data?.message || "Markaziy server xatosi");
-  }
-  return data;
-}
-
-async function getCentralToken() {
-  const baseUrl = getCentralApiBaseUrl();
-  const username = getCentralSyncUsername();
-  const password = getCentralSyncPassword();
-
-  if (!baseUrl || !username || !password) {
-    throw new Error("Markaziy sinxron sozlamalari to'liq emas");
-  }
-
-  const response = await fetch(centralApiUrl("/auth/login"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      username,
-      password
-    })
-  });
-
-  const data = await readJsonOrThrow(response);
-  if (!data?.token) {
-    throw new Error("Markaziy server token qaytarmadi");
-  }
-  return data.token;
-}
-
-async function fetchCentralTransfers(token) {
-  const response = await fetch(centralApiUrl("/transfers"), {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  const data = await readJsonOrThrow(response);
-  return Array.isArray(data?.transfers) ? data.transfers : [];
-}
-
-async function fetchCentralProductByBarcode(token, barcode) {
-  const response = await fetch(
-    `${centralApiUrl("/products")}?q=${encodeURIComponent(barcode)}`,
-    {
-      headers: { Authorization: `Bearer ${token}` }
-    }
-  );
-  const data = await readJsonOrThrow(response);
-  const products = Array.isArray(data?.products) ? data.products : [];
-  return products.find((item) => String(item?.barcode || "").trim() === barcode) || null;
-}
-
-async function ensureCategoryByName(req, categoryName) {
-  const safeName = String(categoryName || "").trim() || "Sinxron kategoriya";
-  let category = await Category.findOne(tenantFilter(req, { name: safeName }));
-  if (!category) {
-    category = await Category.create(withTenant(req, { name: safeName }));
-  }
-  return category;
-}
-
-async function ensureSupplierByName(req, supplierName) {
-  const safeName = String(supplierName || "").trim() || "Sklad transfer";
-  let supplier = await Supplier.findOne(tenantFilter(req, { name: safeName }));
-  if (!supplier) {
-    supplier = await Supplier.create(withTenant(req, {
-      name: safeName,
-      address: "Sklad transfer",
-      phone: ""
-    }));
-  }
-  return supplier;
-}
-
-function supportsPieceSale(unit) {
-  return unit === "qop" || unit === "pachka";
-}
-
 function parsePayload(body, usdRate) {
   const allowPieceSale = Boolean(body?.allowPieceSale);
   const paymentType = String(body?.paymentType || "naqd").toLowerCase();
   const priceCurrency = String(body?.priceCurrency || "uzs").toLowerCase();
-  const unit = String(body?.unit || "").trim().toLowerCase();
-  const gender = String(body?.gender || "").trim().toLowerCase();
-  const sizeOptions = normalizeStringArray(body?.sizeOptions);
-  const colorOptions = normalizeStringArray(body?.colorOptions);
-  const variantStocks = normalizeVariantStocks(body?.variantStocks);
-  const quantity = unit === "razmer"
-    ? variantStocks.reduce((sum, item) => sum + Number(item.quantity || 0), 0)
-    : Number(body?.quantity);
+  const quantity = Number(body?.quantity);
   const purchasePrice = convertToUzs(body?.purchasePrice, priceCurrency, usdRate);
   const totalPurchaseCost = roundMoney(quantity * purchasePrice);
   const rawPaid = convertToUzs(body?.paidAmount, priceCurrency, usdRate);
@@ -221,7 +46,6 @@ function parsePayload(body, usdRate) {
   return {
     name: String(body?.name || "").trim(),
     model: String(body?.model || "").trim(),
-    barcode: normalizeBarcode(body?.barcode),
     categoryId: String(body?.categoryId || "").trim(),
     supplierId: String(body?.supplierId || "").trim(),
     purchasePrice,
@@ -234,13 +58,9 @@ function parsePayload(body, usdRate) {
     paidAmount: Number.isFinite(paidAmount) ? paidAmount : 0,
     debtAmount,
     quantity,
-    unit,
-    gender,
-    sizeOptions,
-    colorOptions,
-    variantStocks,
-    allowPieceSale: supportsPieceSale(unit) ? allowPieceSale : false,
-    pieceUnit: String(body?.pieceUnit || (unit === "pachka" ? "dona" : "kg")).trim().toLowerCase(),
+    unit: String(body?.unit || "").trim().toLowerCase(),
+    allowPieceSale,
+    pieceUnit: String(body?.pieceUnit || "kg").trim().toLowerCase(),
     pieceQtyPerBase: Number(body?.pieceQtyPerBase),
     piecePrice: convertToUzs(body?.piecePrice, priceCurrency, usdRate)
   };
@@ -255,23 +75,9 @@ function validatePayload(payload) {
   }
   if (!["uzs", "usd"].includes(payload.priceCurrency)) return "Valyuta noto'g'ri";
   if (!["naqd", "qarz", "qisman"].includes(payload.paymentType)) return "To'lov turi noto'g'ri";
-  if (!PRODUCT_GENDERS.includes(payload.gender)) return "Jinsi noto'g'ri";
   if (payload.paidAmount > payload.totalPurchaseCost) return "To'langan summa umumiy summadan katta bo'lmasin";
   if (!PRODUCT_UNITS.includes(payload.unit)) {
-    return "Birlik faqat: dona, kg, blok, pachka, qop, razmer";
-  }
-  if (payload.unit === "razmer") {
-    if (!payload.sizeOptions.length) return "Kamida bitta razmer tanlang";
-    if (!payload.colorOptions.length) return "Kamida bitta rang tanlang";
-    if (!payload.variantStocks.length) return "Razmer va rang qoldiqlarini kiriting";
-    for (const item of payload.variantStocks) {
-      if (!payload.sizeOptions.includes(item.size)) {
-        return "Variantdagi razmer noto'g'ri";
-      }
-      if (!payload.colorOptions.includes(item.color)) {
-        return "Variantdagi rang noto'g'ri";
-      }
-    }
+    return "Birlik faqat: dona, kg, blok, pachka, qop";
   }
   if (payload.allowPieceSale) {
     if (!PRODUCT_UNITS.includes(payload.pieceUnit)) {
@@ -289,306 +95,18 @@ function validatePayload(payload) {
   return null;
 }
 
-async function getOrCreateProductSettings(tenantId) {
-  let settings = await AppSettings.findOne({ tenantId });
-  if (!settings) {
-    settings = await AppSettings.create({ tenantId, topProductIds: [] });
-  } else if (!Array.isArray(settings.topProductIds)) {
-    settings.topProductIds = [];
-    await settings.save();
-  }
-  return settings;
-}
-
 router.get("/", authMiddleware, async (req, res) => {
   const query = tenantFilter(req);
   if (req.query.categoryId) {
     query.categoryId = req.query.categoryId;
   }
-  const search = String(req.query.q || "").trim();
-  if (search) {
-    const normalized = normalizeBarcode(search);
-    query.$or = [
-      { barcode: normalized },
-      { name: { $regex: search, $options: "i" } },
-      { model: { $regex: search, $options: "i" } }
-    ];
-  }
 
   const products = await Product.find(query)
     .populate({ path: "categoryId", select: "name" })
     .populate({ path: "supplierId", select: "name phone address" })
-    .sort(search ? { quantity: -1, createdAt: -1 } : { createdAt: -1 })
-    .limit(search ? 20 : 0)
+    .sort({ createdAt: -1 })
     .lean();
   res.json({ products });
-});
-
-router.get("/top", authMiddleware, async (req, res) => {
-  const settings = await getOrCreateProductSettings(req.user.tenantId);
-  const ids = (settings.topProductIds || []).map((item) => String(item));
-  if (!ids.length) {
-    return res.json({ products: [] });
-  }
-
-  const products = await Product.find({
-    tenantId: req.user.tenantId,
-    _id: { $in: ids }
-  })
-    .populate({ path: "categoryId", select: "name" })
-    .populate({ path: "supplierId", select: "name phone address" })
-    .lean();
-
-  const ordered = ids
-    .map((id) => products.find((product) => String(product._id) === id))
-    .filter(Boolean);
-
-  res.json({ products: ordered });
-});
-
-router.put("/top", authMiddleware, async (req, res) => {
-  const productIdsRaw = Array.isArray(req.body?.productIds) ? req.body.productIds : [];
-  const productIds = [...new Set(productIdsRaw.map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 24);
-
-  if (productIds.length) {
-    const matchedProducts = await Product.countDocuments({
-      tenantId: req.user.tenantId,
-      _id: { $in: productIds }
-    });
-    if (matchedProducts !== productIds.length) {
-      return res.status(400).json({ message: "TOP mahsulotlardan biri topilmadi" });
-    }
-  }
-
-  const settings = await getOrCreateProductSettings(req.user.tenantId);
-  settings.topProductIds = productIds;
-  await settings.save();
-
-  const products = await Product.find({
-    tenantId: req.user.tenantId,
-    _id: { $in: productIds }
-  })
-    .populate({ path: "categoryId", select: "name" })
-    .populate({ path: "supplierId", select: "name phone address" })
-    .lean();
-
-  const ordered = productIds
-    .map((id) => products.find((product) => String(product._id) === id))
-    .filter(Boolean);
-
-  res.json({ products: ordered });
-});
-
-router.post("/sync-central", authMiddleware, async (req, res) => {
-  const storeCode = String(req.body?.storeCode || getDefaultStoreCode()).trim();
-  const storeName = String(req.body?.storeName || getDefaultStoreName()).trim().toLowerCase();
-  if (!storeCode && !storeName) {
-    return res.status(400).json({ message: "Do'kon kodi yoki nomi kiritilmagan" });
-  }
-
-  const centralToken = await getCentralToken();
-  const transfers = await fetchCentralTransfers(centralToken);
-  const storeTransfers = transfers.filter(
-    (item) =>
-      String(item?.status || "").trim().toLowerCase() === "sent" &&
-      (
-        (storeCode.length > 0 && String(item?.storeCode || "").trim() === storeCode) ||
-        (storeName.length > 0 && String(item?.storeName || "").trim().toLowerCase() === storeName)
-      )
-  );
-
-  if (!storeTransfers.length) {
-    return res.json({
-      syncedTransfers: 0,
-      syncedProducts: 0,
-      skippedTransfers: 0,
-      message: "Sinxron uchun yangi transfer topilmadi"
-    });
-  }
-
-  const existingLogs = await SyncTransfer.find({
-    tenantId: req.user.tenantId,
-    remoteTransferId: { $in: storeTransfers.map((item) => String(item?._id || "")) }
-  }).lean();
-  const existingIds = new Set(existingLogs.map((item) => String(item.remoteTransferId)));
-  const pendingTransfers = storeTransfers.filter((item) => !existingIds.has(String(item?._id || "")));
-
-  if (!pendingTransfers.length) {
-    return res.json({
-      syncedTransfers: 0,
-      syncedProducts: 0,
-      skippedTransfers: storeTransfers.length,
-      message: "Barcha transferlar oldin sinxron qilingan"
-    });
-  }
-
-  const allBarcodes = [
-    ...new Set(
-      pendingTransfers.flatMap((transfer) =>
-        (Array.isArray(transfer?.items) ? transfer.items : [])
-          .map((item) => String(item?.barcode || "").trim())
-          .filter(Boolean)
-      )
-    )
-  ];
-
-  const remoteProductsMap = new Map();
-  for (const barcode of allBarcodes) {
-    const remoteProduct = await fetchCentralProductByBarcode(centralToken, barcode);
-    if (remoteProduct) {
-      remoteProductsMap.set(barcode, remoteProduct);
-    }
-  }
-
-  let syncedTransfers = 0;
-  let syncedProducts = 0;
-
-  for (const transfer of pendingTransfers) {
-    const transferItems = Array.isArray(transfer?.items) ? transfer.items : [];
-
-    for (const rawItem of transferItems) {
-      const barcode = String(rawItem?.barcode || "").trim();
-      const remoteProduct = remoteProductsMap.get(barcode);
-      const category = await ensureCategoryByName(
-        req,
-        remoteProduct?.categoryId?.name || "Sinxron kategoriya"
-      );
-      const supplier = await ensureSupplierByName(
-        req,
-        remoteProduct?.supplierId?.name || "Sklad transfer"
-      );
-
-      const incomingQuantity = Number(rawItem?.quantity || 0);
-      if (!Number.isFinite(incomingQuantity) || incomingQuantity <= 0) {
-        continue;
-      }
-
-      const unit = String(
-        remoteProduct?.unit || rawItem?.unit || "dona"
-      ).trim().toLowerCase();
-      const purchasePrice = roundMoney(
-        Number(rawItem?.purchasePrice ?? remoteProduct?.purchasePrice ?? 0)
-      );
-      const retailPrice = roundMoney(
-        Number(remoteProduct?.retailPrice ?? purchasePrice)
-      );
-      const wholesalePrice = roundMoney(
-        Number(remoteProduct?.wholesalePrice ?? retailPrice)
-      );
-      const sizeOptions = normalizeStringArray(remoteProduct?.sizeOptions);
-      const colorOptions = normalizeStringArray(remoteProduct?.colorOptions);
-      const remoteVariantStocks = normalizeVariantStocks(remoteProduct?.variantStocks);
-
-      let product = await Product.findOne(
-        tenantFilter(req, { barcode: barcode || "__missing__" })
-      );
-
-      if (!product) {
-        product = await Product.create(withTenant(req, {
-          name: String(remoteProduct?.name || rawItem?.name || "Transfer mahsulot").trim(),
-          model: String(remoteProduct?.model || rawItem?.model || "-").trim(),
-          barcode: barcode || generateBarcodeCandidate(),
-          categoryId: category._id,
-          supplierId: supplier._id,
-          purchasePrice,
-          priceCurrency: "uzs",
-          usdRateUsed: Number(remoteProduct?.usdRateUsed || 12171) || 12171,
-          totalPurchaseCost: roundMoney(purchasePrice * incomingQuantity),
-          retailPrice,
-          wholesalePrice,
-          paymentType: "naqd",
-          paidAmount: roundMoney(purchasePrice * incomingQuantity),
-          debtAmount: 0,
-          quantity: incomingQuantity,
-          unit: PRODUCT_UNITS.includes(unit) ? unit : "dona",
-          gender: String(remoteProduct?.gender || "").trim().toLowerCase(),
-          sizeOptions,
-          colorOptions,
-          variantStocks: unit === "razmer" ? [] : [],
-          allowPieceSale: Boolean(remoteProduct?.allowPieceSale),
-          pieceUnit: String(remoteProduct?.pieceUnit || "kg").trim().toLowerCase(),
-          pieceQtyPerBase: Number(remoteProduct?.pieceQtyPerBase || 0),
-          piecePrice: Number(remoteProduct?.piecePrice || 0)
-        }));
-      } else {
-        product.name = String(remoteProduct?.name || rawItem?.name || product.name).trim();
-        product.model = String(remoteProduct?.model || rawItem?.model || product.model).trim();
-        product.categoryId = category._id;
-        product.supplierId = supplier._id;
-        product.purchasePrice = purchasePrice;
-        product.retailPrice = retailPrice;
-        product.wholesalePrice = wholesalePrice;
-        product.priceCurrency = "uzs";
-        product.usdRateUsed = Number(remoteProduct?.usdRateUsed || product.usdRateUsed || 12171) || 12171;
-        product.quantity = roundMoney(Number(product.quantity || 0) + incomingQuantity);
-        product.totalPurchaseCost = roundMoney(purchasePrice * incomingQuantity);
-        product.paymentType = "naqd";
-        product.paidAmount = roundMoney(purchasePrice * incomingQuantity);
-        product.debtAmount = 0;
-        if (PRODUCT_UNITS.includes(unit)) {
-          product.unit = unit;
-        }
-        if (PRODUCT_GENDERS.includes(String(remoteProduct?.gender || "").trim().toLowerCase())) {
-          product.gender = String(remoteProduct?.gender || "").trim().toLowerCase();
-        }
-        if (sizeOptions.length) {
-          product.sizeOptions = sizeOptions;
-        }
-        if (colorOptions.length) {
-          product.colorOptions = colorOptions;
-        }
-        if (product.unit === "razmer" && !product.variantStocks.length && remoteVariantStocks.length) {
-          product.variantStocks = remoteVariantStocks.map((item) => ({
-            size: item.size,
-            color: item.color,
-            quantity: 0
-          }));
-        }
-        product.allowPieceSale = Boolean(remoteProduct?.allowPieceSale);
-        product.pieceUnit = String(remoteProduct?.pieceUnit || product.pieceUnit || "kg")
-          .trim()
-          .toLowerCase();
-        product.pieceQtyPerBase = Number(remoteProduct?.pieceQtyPerBase || product.pieceQtyPerBase || 0);
-        product.piecePrice = Number(remoteProduct?.piecePrice || product.piecePrice || 0);
-        await product.save();
-      }
-
-      await Purchase.create(withTenant(req, {
-        entryType: "restock",
-        supplierId: supplier._id,
-        productId: product._id,
-        productName: product.name,
-        productModel: product.model,
-        quantity: incomingQuantity,
-        unit: product.unit,
-        purchasePrice,
-        priceCurrency: "uzs",
-        usdRateUsed: Number(product.usdRateUsed || 12171) || 12171,
-        totalCost: roundMoney(purchasePrice * incomingQuantity),
-        paidAmount: roundMoney(purchasePrice * incomingQuantity),
-        debtAmount: 0,
-        paymentType: "naqd",
-        pricingMode: "replace_all"
-      }));
-      syncedProducts += 1;
-    }
-
-    await SyncTransfer.create(withTenant(req, {
-      remoteTransferId: String(transfer?._id || ""),
-      remoteTransferNumber: String(transfer?.transferNumber || ""),
-      storeCode: storeCode || String(transfer?.storeCode || storeName),
-      syncedAt: new Date(),
-      itemCount: transferItems.length
-    }));
-    syncedTransfers += 1;
-  }
-
-  return res.json({
-    syncedTransfers,
-    syncedProducts,
-    skippedTransfers: storeTransfers.length - pendingTransfers.length,
-    message: `${syncedTransfers} ta transfer sinxron qilindi`
-  });
 });
 
 router.post("/", authMiddleware, async (req, res) => {
@@ -596,9 +114,6 @@ router.post("/", authMiddleware, async (req, res) => {
   const payload = parsePayload(req.body, usdRate);
   const invalid = validatePayload(payload);
   if (invalid) return res.status(400).json({ message: invalid });
-  const barcodeResult = await ensureUniqueBarcode(req.user.tenantId, payload.barcode);
-  if (barcodeResult.error) return res.status(409).json({ message: barcodeResult.error });
-  payload.barcode = barcodeResult.barcode;
 
   const categoryExists = await Category.exists(tenantFilter(req, { _id: payload.categoryId }));
   if (!categoryExists) return res.status(400).json({ message: "Kategoriya topilmadi" });
@@ -754,13 +269,6 @@ router.put("/:id", authMiddleware, async (req, res) => {
   const payload = parsePayload(req.body, usdRate);
   const invalid = validatePayload(payload);
   if (invalid) return res.status(400).json({ message: invalid });
-  const barcodeResult = await ensureUniqueBarcode(
-    req.user.tenantId,
-    payload.barcode,
-    req.params.id
-  );
-  if (barcodeResult.error) return res.status(409).json({ message: barcodeResult.error });
-  payload.barcode = barcodeResult.barcode;
 
   const categoryExists = await Category.exists(tenantFilter(req, { _id: payload.categoryId }));
   if (!categoryExists) return res.status(400).json({ message: "Kategoriya topilmadi" });

@@ -268,25 +268,4 @@ router.post("/:id/payments", authMiddleware, requireAdmin, async (req, res) => {
   });
 });
 
-router.delete("/:id", authMiddleware, requireAdmin, async (req, res) => {
-  const customer = await Customer.findOne(tenantFilter(req, { _id: req.params.id }));
-  if (!customer) return res.status(404).json({ message: "Mijoz topilmadi" });
-
-  if (Number(customer.totalDebt || 0) > 0) {
-    return res.status(400).json({ message: "Mijozning qarzi bor. Avval qarzni yoping." });
-  }
-
-  const hasSales = await Sale.exists(tenantFilter(req, { customerId: customer._id }));
-  if (hasSales) {
-    return res.status(400).json({
-      message: "Bu mijozga bog'langan savdo tarixi bor. O'chirib bo'lmaydi."
-    });
-  }
-
-  await CustomerPayment.deleteMany(tenantFilter(req, { customerId: customer._id }));
-  await Customer.deleteOne({ _id: customer._id });
-
-  res.json({ ok: true });
-});
-
 export default router;
