@@ -770,8 +770,49 @@ router.put("/:id", authMiddleware, async (req, res) => {
   const duplicate = await Product.exists(tenantFilter(req, { name: payload.name, model: payload.model, categoryId: payload.categoryId, _id: { $ne: req.params.id } }));
   if (duplicate) return res.status(409).json({ message: "Bu mahsulot allaqachon mavjud" });
 
+  const existing = await Product.findOne(tenantFilter(req, { _id: req.params.id })).lean();
+  if (!existing) return res.status(404).json({ message: "Mahsulot topilmadi" });
+
+  const oldQty = Number(existing.quantity) || 0;
+  const nextQty = Number(payload.quantity) || 0;
+  const qtyDelta = roundMoney(nextQty - oldQty);
+
+  if (qtyDelta < 0) {
+    return res.status(400).json({
+      message: "Miqdorni kamaytirish uchun sotuv yoki qaytaruvdan foydalaning. Edit faqat oshirishga ruxsat beradi."
+    });
+  }
+
   const updated = await Product.findOneAndUpdate(tenantFilter(req, { _id: req.params.id }), payload, { new: true, runValidators: true });
   if (!updated) return res.status(404).json({ message: "Mahsulot topilmadi" });
+
+  if (qtyDelta > 0) {
+    const incomingTotal = roundMoney(qtyDelta * (Number(payload.purchasePrice) || 0));
+    const paidAmount = payload.paymentType === "naqd"
+      ? incomingTotal
+      : payload.paymentType === "qarz"
+        ? 0
+        : Math.min(incomingTotal, Number(payload.paidAmount) || 0);
+    const debtAmount = Math.max(0, incomingTotal - paidAmount);
+
+    await Purchase.create(withTenant(req, {
+      entryType: "restock",
+      supplierId: payload.supplierId,
+      productId: updated._id,
+      productName: payload.name,
+      productModel: payload.model,
+      quantity: qtyDelta,
+      unit: payload.unit,
+      purchasePrice: payload.purchasePrice,
+      priceCurrency: payload.priceCurrency,
+      usdRateUsed: payload.usdRateUsed,
+      totalCost: incomingTotal,
+      paidAmount,
+      debtAmount,
+      paymentType: payload.paymentType,
+      pricingMode: "replace_all"
+    }));
+  }
 
   res.json({ product: updated });
 });
