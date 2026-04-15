@@ -6,6 +6,7 @@ import { Supplier } from "../models/Supplier.js";
 import { Purchase } from "../models/Purchase.js";
 import { AppSettings } from "../models/AppSettings.js";
 import { SyncTransfer } from "../models/SyncTransfer.js";
+import { Transfer } from "../models/Transfer.js";
 import { tenantFilter, withTenant } from "../tenant.js";
 
 const router = Router();
@@ -103,6 +104,32 @@ function normalizeVariantStocks(value) {
       quantity: Number(item?.quantity)
     }))
     .filter((item) => item.size && item.color && Number.isFinite(item.quantity) && item.quantity >= 0);
+}
+
+function mergeVariantStocks(existingStocks, incomingStocks) {
+  const bucket = new Map();
+
+  for (const item of normalizeVariantStocks(existingStocks)) {
+    const key = `${item.size}::${item.color}`;
+    bucket.set(key, {
+      size: item.size,
+      color: item.color,
+      quantity: Number(item.quantity || 0)
+    });
+  }
+
+  for (const item of normalizeVariantStocks(incomingStocks)) {
+    const key = `${item.size}::${item.color}`;
+    const current = bucket.get(key) || {
+      size: item.size,
+      color: item.color,
+      quantity: 0
+    };
+    current.quantity = roundMoney(Number(current.quantity || 0) + Number(item.quantity || 0));
+    bucket.set(key, current);
+  }
+
+  return [...bucket.values()].filter((item) => Number(item.quantity || 0) > 0);
 }
 
 function centralApiUrl(path) {
@@ -478,6 +505,20 @@ router.post("/sync-central", authMiddleware, async (req, res) => {
       const sizeOptions = normalizeStringArray(remoteProduct?.sizeOptions);
       const colorOptions = normalizeStringArray(remoteProduct?.colorOptions);
       const remoteVariantStocks = normalizeVariantStocks(remoteProduct?.variantStocks);
+      const transferredVariantStocks = normalizeVariantStocks(
+        rawItem?.variants || rawItem?.variantStocks
+      );
+      const effectiveVariantStocks = transferredVariantStocks.length
+        ? transferredVariantStocks
+        : remoteVariantStocks;
+      const effectiveSizeOptions = normalizeStringArray([
+        ...sizeOptions,
+        ...effectiveVariantStocks.map((item) => item.size)
+      ]);
+      const effectiveColorOptions = normalizeStringArray([
+        ...colorOptions,
+        ...effectiveVariantStocks.map((item) => item.color)
+      ]);
 
       let product = await Product.findOne(
         tenantFilter(req, { barcode: barcode || "__missing__" })
@@ -502,9 +543,9 @@ router.post("/sync-central", authMiddleware, async (req, res) => {
           quantity: incomingQuantity,
           unit: PRODUCT_UNITS.includes(unit) ? unit : "dona",
           gender: String(remoteProduct?.gender || "").trim().toLowerCase(),
-          sizeOptions,
-          colorOptions,
-          variantStocks: unit === "razmer" ? [] : [],
+          sizeOptions: effectiveSizeOptions,
+          colorOptions: effectiveColorOptions,
+          variantStocks: effectiveVariantStocks,
           allowPieceSale: Boolean(remoteProduct?.allowPieceSale),
           pieceUnit: String(remoteProduct?.pieceUnit || "kg").trim().toLowerCase(),
           pieceQtyPerBase: Number(remoteProduct?.pieceQtyPerBase || 0),
@@ -531,18 +572,17 @@ router.post("/sync-central", authMiddleware, async (req, res) => {
         if (PRODUCT_GENDERS.includes(String(remoteProduct?.gender || "").trim().toLowerCase())) {
           product.gender = String(remoteProduct?.gender || "").trim().toLowerCase();
         }
-        if (sizeOptions.length) {
-          product.sizeOptions = sizeOptions;
+        if (effectiveSizeOptions.length) {
+          product.sizeOptions = effectiveSizeOptions;
         }
-        if (colorOptions.length) {
-          product.colorOptions = colorOptions;
+        if (effectiveColorOptions.length) {
+          product.colorOptions = effectiveColorOptions;
         }
-        if (product.unit === "razmer" && !product.variantStocks.length && remoteVariantStocks.length) {
-          product.variantStocks = remoteVariantStocks.map((item) => ({
-            size: item.size,
-            color: item.color,
-            quantity: 0
-          }));
+        if (effectiveVariantStocks.length) {
+          product.variantStocks = mergeVariantStocks(
+            product.variantStocks,
+            effectiveVariantStocks
+          );
         }
         product.allowPieceSale = Boolean(remoteProduct?.allowPieceSale);
         product.pieceUnit = String(remoteProduct?.pieceUnit || product.pieceUnit || "kg")
@@ -780,6 +820,29 @@ router.delete("/:id", authMiddleware, async (req, res) => {
   const deleted = await Product.findOneAndDelete(tenantFilter(req, { _id: req.params.id }));
   if (!deleted) return res.status(404).json({ message: "Mahsulot topilmadi" });
   res.json({ ok: true });
+});
+
+// Get transfers
+router.get("/transfers", authMiddleware, async (req, res) => {
+  const { q = "", storeName = "", storeCode = "" } = req.query;
+  const filter = tenantFilter(req);
+
+  if (storeCode) {
+    filter.storeCode = storeCode;
+  }
+  if (storeName) {
+    filter.storeName = new RegExp(storeName, "i");
+  }
+  if (q) {
+    filter.$or = [
+      { transferNumber: new RegExp(q, "i") },
+      { storeName: new RegExp(q, "i") },
+      { note: new RegExp(q, "i") }
+    ];
+  }
+
+  const transfers = await Transfer.find(filter).sort({ createdAt: -1 }).lean();
+  res.json({ transfers });
 });
 
 export default router;

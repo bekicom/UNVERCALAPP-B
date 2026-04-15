@@ -576,11 +576,11 @@ router.post("/", authMiddleware, async (req, res) => {
     let variantSize = "";
     let variantColor = "";
 
-    if (product.unit === "razmer" && Array.isArray(product.variantStocks) && product.variantStocks.length > 0) {
+    if (Array.isArray(product.variantStocks) && product.variantStocks.length > 0) {
       variantSize = String(reqItem.variantSize || "").trim();
       variantColor = String(reqItem.variantColor || "").trim();
       if (!variantSize || !variantColor) {
-        return res.status(400).json({ message: `${product.name} uchun razmer va rang tanlang` });
+        return res.status(400).json({ message: `${product.name} uchun variant tanlang` });
       }
       const variant = product.variantStocks.find(
         (it) => String(it?.size || "").trim() === variantSize && String(it?.color || "").trim() === variantColor
@@ -591,7 +591,10 @@ router.post("/", authMiddleware, async (req, res) => {
       currentVariantQty = Number(variant.quantity) || 0;
     }
 
-    const safeAvailableQty = product.unit === "razmer" ? currentVariantQty : currentQty;
+    const safeAvailableQty =
+      Array.isArray(product.variantStocks) && product.variantStocks.length > 0
+        ? currentVariantQty
+        : currentQty;
     if (reqItem.quantity > safeAvailableQty) {
       return res.status(409).json({
         message: `${product.name} uchun qoldiq yetarli emas (${safeAvailableQty})`
@@ -807,20 +810,38 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
 
   const returnItems = [];
   for (const item of items) {
-    const saleItem = sale.items.find((it) => String(it.productId) === item.productId);
-    if (!saleItem) {
+    const requestedVariantSize = String(item.variantSize || "").trim();
+    const requestedVariantColor = String(item.variantColor || "").trim();
+    let matchingSaleItems = sale.items.filter((it) => {
+      if (String(it.productId) !== item.productId) return false;
+      return String(it.variantSize || "").trim() === requestedVariantSize
+        && String(it.variantColor || "").trim() === requestedVariantColor;
+    });
+    if (matchingSaleItems.length < 1 && (requestedVariantSize || requestedVariantColor)) {
+      matchingSaleItems = sale.items.filter((it) => {
+        if (String(it.productId) !== item.productId) return false;
+        return !String(it.variantSize || "").trim() && !String(it.variantColor || "").trim();
+      });
+    }
+    if (matchingSaleItems.length < 1) {
       return res.status(400).json({ message: "Bu mahsulot ushbu sotuvda topilmadi" });
     }
 
-    const soldQty = Number(saleItem.quantity || 0);
-    const returnedQty = Number(saleItem.returnedQuantity || 0);
-    const leftQty = roundMoney(soldQty - returnedQty);
+    const leftQty = roundMoney(
+      matchingSaleItems.reduce((sum, saleItem) => {
+        const soldQty = Number(saleItem.quantity || 0);
+        const returnedQty = Number(saleItem.returnedQuantity || 0);
+        return sum + roundMoney(soldQty - returnedQty);
+      }, 0)
+    );
     if (!isPositiveNumber(item.quantity) || item.quantity > leftQty) {
+      const saleItem = matchingSaleItems[0];
       return res.status(400).json({
         message: `${saleItem.productName} uchun maksimal vozvrat: ${leftQty}`
       });
     }
 
+    const saleItem = matchingSaleItems[0];
     const unitPrice = Number(saleItem.unitPrice || 0);
     const costPrice = Number(saleItem.costPrice || 0);
     const lineTotal = roundMoney(unitPrice * item.quantity);
@@ -831,8 +852,8 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
       productName: saleItem.productName,
       barcode: saleItem.barcode || "",
       unit: saleItem.unit,
-      variantSize: saleItem.variantSize || "",
-      variantColor: saleItem.variantColor || "",
+      variantSize: requestedVariantSize,
+      variantColor: requestedVariantColor,
       quantity: roundMoney(item.quantity),
       unitPrice,
       lineTotal,
@@ -874,14 +895,6 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
     refundPayments = { cash: 0, card: returnTotal, click: 0 };
   } else if (paymentType === "click") {
     refundPayments = { cash: 0, card: 0, click: returnTotal };
-  }
-
-  if (paymentType !== "debt") {
-    if (refundPayments.cash - availablePayments.cash > 0.01
-      || refundPayments.card - availablePayments.card > 0.01
-      || refundPayments.click - availablePayments.click > 0.01) {
-      return res.status(400).json({ message: "Tanlangan to'lov turida qaytarish uchun yetarli summa yo'q" });
-    }
   }
 
   const updatedStock = [];
@@ -926,11 +939,39 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
   }
 
   for (const item of returnItems) {
-    const target = sale.items.find((it) => String(it.productId) === String(item.productId));
-    if (!target) continue;
-    target.returnedQuantity = roundMoney(Number(target.returnedQuantity || 0) + item.quantity);
-    target.returnedTotal = roundMoney(Number(target.returnedTotal || 0) + item.lineTotal);
-    target.returnedProfit = roundMoney(Number(target.returnedProfit || 0) + item.lineProfit);
+    let remainingQty = roundMoney(item.quantity);
+    let targetRows = sale.items.filter((target) => {
+      if (String(target.productId) !== String(item.productId)) return false;
+      return String(target.variantSize || "").trim() === String(item.variantSize || "").trim()
+        && String(target.variantColor || "").trim() === String(item.variantColor || "").trim();
+    });
+    if (targetRows.length < 1 && (item.variantSize || item.variantColor)) {
+      targetRows = sale.items.filter((target) => {
+        if (String(target.productId) !== String(item.productId)) return false;
+        return !String(target.variantSize || "").trim() && !String(target.variantColor || "").trim();
+      });
+    }
+
+    for (const target of targetRows) {
+      if (remainingQty <= 0.0001) break;
+
+      const soldQty = Number(target.quantity || 0);
+      const returnedQty = Number(target.returnedQuantity || 0);
+      const availableQty = roundMoney(soldQty - returnedQty);
+      if (availableQty <= 0.0001) continue;
+
+      const qtyForThisRow = roundMoney(Math.min(availableQty, remainingQty));
+      const unitPrice = Number(target.unitPrice || 0);
+      const costPrice = Number(target.costPrice || 0);
+
+      target.returnedQuantity = roundMoney(Number(target.returnedQuantity || 0) + qtyForThisRow);
+      target.returnedTotal = roundMoney(Number(target.returnedTotal || 0) + roundMoney(unitPrice * qtyForThisRow));
+      target.returnedProfit = roundMoney(
+        Number(target.returnedProfit || 0) + roundMoney((unitPrice - costPrice) * qtyForThisRow)
+      );
+
+      remainingQty = roundMoney(remainingQty - qtyForThisRow);
+    }
   }
 
   sale.totalAmount = roundMoney(Math.max(0, Number(sale.totalAmount || 0) - returnTotal));
