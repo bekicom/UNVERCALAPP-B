@@ -289,19 +289,6 @@ function validatePayload(payload) {
   if (!PRODUCT_UNITS.includes(payload.unit)) {
     return "Birlik faqat: dona, kg, blok, pachka, qop, razmer";
   }
-  if (payload.unit === "razmer") {
-    if (!payload.sizeOptions.length) return "Kamida bitta razmer tanlang";
-    if (!payload.colorOptions.length) return "Kamida bitta rang tanlang";
-    if (!payload.variantStocks.length) return "Razmer va rang qoldiqlarini kiriting";
-    for (const item of payload.variantStocks) {
-      if (!payload.sizeOptions.includes(item.size)) {
-        return "Variantdagi razmer noto'g'ri";
-      }
-      if (!payload.colorOptions.includes(item.color)) {
-        return "Variantdagi rang noto'g'ri";
-      }
-    }
-  }
   if (payload.allowPieceSale) {
     if (!PRODUCT_UNITS.includes(payload.pieceUnit)) {
       return "Parcha birlik noto'g'ri";
