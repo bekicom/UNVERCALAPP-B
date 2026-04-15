@@ -8,6 +8,7 @@ const appSettingsSchema = new mongoose.Schema(
     displayCurrency: { type: String, enum: ["uzs", "usd"], required: true, default: "uzs" },
     keyboardEnabled: { type: Boolean, required: true, default: true },
     ustalarEnabled: { type: Boolean, required: true, default: false },
+<<<<<<< HEAD
     posCompactMode: { type: Boolean, required: true, default: false },
     variantInsightsEnabled: { type: Boolean, required: true, default: false },
     topProductIds: {
@@ -50,3 +51,26 @@ const appSettingsSchema = new mongoose.Schema(
 );
 
 export const AppSettings = mongoose.model("AppSettings", appSettingsSchema);
+=======
+    receipt: {
+      title: { type: String, trim: true, default: "CHEK" },
+      footer: { type: String, trim: true, default: "Xaridingiz uchun rahmat!" },
+      logoUrl: { type: String, trim: true, default: "" },
+      fields: {
+        showDate: { type: Boolean, default: true },
+        showCashier: { type: Boolean, default: true },
+        showPaymentType: { type: Boolean, default: true },
+        showCustomer: { type: Boolean, default: true },
+        showItemsTable: { type: Boolean, default: true },
+        showItemUnitPrice: { type: Boolean, default: true },
+        showItemLineTotal: { type: Boolean, default: true },
+        showTotal: { type: Boolean, default: true },
+        showFooter: { type: Boolean, default: true }
+      }
+    }
+  },
+  { timestamps: true }
+);
+
+export const AppSettings = mongoose.model("AppSettings", appSettingsSchema);
+>>>>>>> b87c25050512a2ade573d01e46a21ed576558824
