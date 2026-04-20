@@ -55,9 +55,22 @@ export const AppSettings = mongoose.model("AppSettings", appSettingsSchema);
     receipt: {
       title: { type: String, trim: true, default: "CHEK" },
       footer: { type: String, trim: true, default: "Xaridingiz uchun rahmat!" },
+      phoneNumber: { type: String, trim: true, default: "" },
+      legalText: {
+        type: String,
+        trim: true,
+        default:
+          "Hurmatli xaridor!\nMaxsulotni ilk holatdagi korinishi va qadogi buzulmagan muhri va yorliqlari mavjud bolsa 1 hafta ichida almashtirish huquqiga egasz.\nAlmashtirishda mahsulot yorligi hamda xarid cheki talab qilinadi.\nOyinchoqlar, aksessuarlar (surgich butilka), ichkiyimlar, suzish kiyimlari, chaqaloqlar kiyimlari gigiyenik nuqtai nazardan almashtirib berilmaydi.",
+      },
       logoUrl: { type: String, trim: true, default: "" },
       fields: {
+        showLogo: { type: Boolean, default: true },
+        showTitle: { type: Boolean, default: true },
+        showReceiptNumber: { type: Boolean, default: true },
         showDate: { type: Boolean, default: true },
+        showTime: { type: Boolean, default: true },
+        showType: { type: Boolean, default: false },
+        showShift: { type: Boolean, default: true },
         showCashier: { type: Boolean, default: true },
         showPaymentType: { type: Boolean, default: true },
         showCustomer: { type: Boolean, default: true },
@@ -65,7 +78,10 @@ export const AppSettings = mongoose.model("AppSettings", appSettingsSchema);
         showItemUnitPrice: { type: Boolean, default: true },
         showItemLineTotal: { type: Boolean, default: true },
         showTotal: { type: Boolean, default: true },
-        showFooter: { type: Boolean, default: true }
+        showFooter: { type: Boolean, default: true },
+        showLegalText: { type: Boolean, default: true },
+        showPhoneNumber: { type: Boolean, default: true },
+        showContactLine: { type: Boolean, default: false }
       }
     }
   },

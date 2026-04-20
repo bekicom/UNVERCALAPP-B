@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 import { Router } from "express";
 import { authMiddleware } from "../authMiddleware.js";
 import { Customer } from "../models/Customer.js";
@@ -16,6 +15,25 @@ function roundMoney(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
+function roundQty(value) {
+  return Math.round(Number(value) * 1000000) / 1000000;
+}
+
+function normalizeProductCode(value, barcode = "") {
+  const normalized = String(value || "").replace(/\D+/g, "").slice(-4);
+  if (normalized) return normalized.padStart(4, "0");
+  const barcodeDigits = String(barcode || "").replace(/\D+/g, "").slice(-4);
+  return barcodeDigits ? barcodeDigits.padStart(4, "0") : "0000";
+}
+
+async function getNextSaleNumber(tenantId) {
+  const lastSale = await Sale.findOne({ tenantId })
+    .sort({ saleNumber: -1, createdAt: -1 })
+    .select("saleNumber")
+    .lean();
+  return Math.max(1, Number(lastSale?.saleNumber || 0) + 1);
+}
+
 function normalizeItems(rawItems) {
   if (!Array.isArray(rawItems)) return [];
   const merged = new Map();
@@ -27,17 +45,27 @@ function normalizeItems(rawItems) {
     const unitPrice = Number(it?.unitPrice);
     const variantSize = String(it?.variantSize || "").trim();
     const variantColor = String(it?.variantColor || "").trim();
+    const saleMode = String(it?.saleMode || "base").trim().toLowerCase();
+    const saleUnit = String(it?.saleUnit || "").trim().toLowerCase();
+    const stockPerUnitInBase = Number(it?.stockPerUnitInBase);
     if (!productId || !Number.isFinite(quantity) || quantity <= 0) continue;
     const normalizedPriceType = priceType === "wholesale" ? "wholesale" : "retail";
     const safeUnitPrice = Number.isFinite(unitPrice) && unitPrice >= 0 ? roundMoney(unitPrice) : null;
-    const key = `${productId}:${normalizedPriceType}:${safeUnitPrice ?? "auto"}:${variantSize}:${variantColor}`;
+    const safeSaleMode = saleMode === "piece" ? "piece" : "base";
+    const safeSaleUnit = saleUnit || "";
+    const safeStockPerUnitInBase =
+      Number.isFinite(stockPerUnitInBase) && stockPerUnitInBase > 0 ? roundQty(stockPerUnitInBase) : 1;
+    const key = `${productId}:${normalizedPriceType}:${safeUnitPrice ?? "auto"}:${variantSize}:${variantColor}:${safeSaleMode}:${safeSaleUnit}:${safeStockPerUnitInBase}`;
     const prev = merged.get(key) || {
       productId,
       quantity: 0,
       priceType: normalizedPriceType,
       unitPrice: safeUnitPrice,
       variantSize,
-      variantColor
+      variantColor,
+      saleMode: safeSaleMode,
+      saleUnit: safeSaleUnit,
+      stockPerUnitInBase: safeStockPerUnitInBase
     };
     merged.set(key, {
       productId,
@@ -45,6 +73,9 @@ function normalizeItems(rawItems) {
       unitPrice: safeUnitPrice,
       variantSize,
       variantColor,
+      saleMode: prev.saleMode,
+      saleUnit: prev.saleUnit,
+      stockPerUnitInBase: prev.stockPerUnitInBase,
       quantity: roundMoney(prev.quantity + quantity)
     });
   }
@@ -66,6 +97,16 @@ function sumPayments(payments) {
 
 function isPositiveNumber(value) {
   return Number.isFinite(value) && value > 0;
+}
+
+function supportsPieceSale(product) {
+  if (!product) return false;
+  const unit = String(product.unit || "").trim().toLowerCase();
+  return Boolean(
+    product.allowPieceSale &&
+    (unit === "pachka" || unit === "qop") &&
+    Number(product.pieceQtyPerBase) > 0
+  );
 }
 
 function normalizePlate(value) {
@@ -555,7 +596,7 @@ router.post("/", authMiddleware, async (req, res) => {
 
   const productIds = [...new Set(items.map((it) => it.productId))];
   const products = await Product.find(tenantFilter(req, { _id: { $in: productIds } }))
-    .select("_id name model barcode unit quantity variantStocks retailPrice wholesalePrice purchasePrice")
+    .select("_id name model barcode productCode unit quantity variantStocks retailPrice wholesalePrice purchasePrice allowPieceSale pieceUnit pieceQtyPerBase piecePrice")
     .populate({ path: "categoryId", select: "name" })
     .lean();
 
@@ -592,23 +633,39 @@ router.post("/", authMiddleware, async (req, res) => {
       currentVariantQty = Number(variant.quantity) || 0;
     }
 
-    const safeAvailableQty =
+    const safeAvailableBaseQty =
       Array.isArray(product.variantStocks) && product.variantStocks.length > 0
         ? currentVariantQty
         : currentQty;
-    if (reqItem.quantity > safeAvailableQty) {
+    const pieceModeRequested = String(reqItem.saleMode || "").trim().toLowerCase() === "piece";
+    const pieceSaleAllowed = supportsPieceSale(product);
+    const stockPerUnitInBase =
+      pieceModeRequested && pieceSaleAllowed ? roundQty(1 / Number(product.pieceQtyPerBase || 1)) : 1;
+    const requestedBaseQty = roundQty(Number(reqItem.quantity || 0) * stockPerUnitInBase);
+    if (requestedBaseQty > safeAvailableBaseQty) {
+      const availableInRequestedUnit = pieceModeRequested && pieceSaleAllowed
+        ? Math.floor(safeAvailableBaseQty / stockPerUnitInBase)
+        : safeAvailableBaseQty;
+      const saleUnitLabel = pieceModeRequested && pieceSaleAllowed
+        ? String(product.pieceUnit || "dona")
+        : String(product.unit || "dona");
       return res.status(409).json({
-        message: `${product.name} uchun qoldiq yetarli emas (${safeAvailableQty})`
+        message: `${product.name} uchun qoldiq yetarli emas (${availableInRequestedUnit} ${saleUnitLabel})`
       });
     }
 
-    const defaultUnitPrice = reqItem.priceType === "wholesale"
+    const defaultUnitPrice = pieceModeRequested && pieceSaleAllowed
+      ? Number(product.piecePrice || product.retailPrice || 0)
+      : reqItem.priceType === "wholesale"
       ? Number(product.wholesalePrice || 0)
       : Number(product.retailPrice || 0);
     const unitPrice = Number.isFinite(reqItem.unitPrice) && reqItem.unitPrice >= 0
       ? Number(reqItem.unitPrice)
       : defaultUnitPrice;
-    const costPrice = Number(product.purchasePrice) || 0;
+    const baseCostPrice = Number(product.purchasePrice) || 0;
+    const costPrice = pieceModeRequested && pieceSaleAllowed
+      ? roundMoney(baseCostPrice * stockPerUnitInBase)
+      : baseCostPrice;
     const lineTotal = roundMoney(unitPrice * reqItem.quantity);
     const lineProfit = roundMoney((unitPrice - costPrice) * reqItem.quantity);
     saleItems.push({
@@ -617,11 +674,16 @@ router.post("/", authMiddleware, async (req, res) => {
       productModel: product.model || "",
       categoryName: product.categoryId?.name || "",
       barcode: product.barcode || "",
-      unit: product.unit,
+      productCode: normalizeProductCode(product.productCode, product.barcode),
+      unit: pieceModeRequested && pieceSaleAllowed
+        ? String(product.pieceUnit || reqItem.saleUnit || "dona")
+        : product.unit,
       variantSize,
       variantColor,
       priceType: reqItem.priceType === "wholesale" ? "wholesale" : "retail",
       quantity: reqItem.quantity,
+      baseQuantity: requestedBaseQty,
+      stockPerUnitInBase,
       unitPrice,
       lineTotal,
       costPrice,
@@ -629,454 +691,17 @@ router.post("/", authMiddleware, async (req, res) => {
     });
   }
 
-=======
-import { Router } from "express";
-import { authMiddleware } from "../authMiddleware.js";
-import { Customer } from "../models/Customer.js";
-import { CustomerPayment } from "../models/CustomerPayment.js";
-import { Master } from "../models/Master.js";
-import { Product } from "../models/Product.js";
-import { Sale } from "../models/Sale.js";
-import { tenantFilter, withTenant } from "../tenant.js";
-
-const router = Router();
-const PAYMENT_TYPES = ["cash", "card", "click", "mixed", "debt"];
-
-function roundMoney(value) {
-  return Math.round(Number(value) * 100) / 100;
-}
-
-function normalizeItems(rawItems) {
-  if (!Array.isArray(rawItems)) return [];
-  const merged = new Map();
-
-  for (const it of rawItems) {
-    const productId = String(it?.productId || "").trim();
-    const quantity = Number(it?.quantity);
-    const priceType = String(it?.priceType || "retail").trim().toLowerCase();
-    const unitPrice = Number(it?.unitPrice);
-    if (!productId || !Number.isFinite(quantity) || quantity <= 0) continue;
-    const normalizedPriceType = priceType === "wholesale" ? "wholesale" : "retail";
-    const safeUnitPrice = Number.isFinite(unitPrice) && unitPrice >= 0 ? roundMoney(unitPrice) : null;
-    const key = `${productId}:${normalizedPriceType}:${safeUnitPrice ?? "auto"}`;
-    const prev = merged.get(key) || { productId, quantity: 0, priceType: normalizedPriceType, unitPrice: safeUnitPrice };
-    merged.set(key, {
-      productId,
-      priceType: normalizedPriceType,
-      unitPrice: safeUnitPrice,
-      quantity: roundMoney(prev.quantity + quantity)
-    });
-  }
-
-  return [...merged.values()];
-}
-
-function normalizePayments(raw) {
-  return {
-    cash: roundMoney(Math.max(0, Number(raw?.cash) || 0)),
-    card: roundMoney(Math.max(0, Number(raw?.card) || 0)),
-    click: roundMoney(Math.max(0, Number(raw?.click) || 0))
-  };
-}
-
-function sumPayments(payments) {
-  return roundMoney(Number(payments?.cash || 0) + Number(payments?.card || 0) + Number(payments?.click || 0));
-}
-
-function isPositiveNumber(value) {
-  return Number.isFinite(value) && value > 0;
-}
-
-function normalizePlate(value) {
-  return String(value || "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "");
-}
-
-async function resolveMasterSale(req, rawMaster = {}) {
-  const fullName = String(rawMaster?.fullName || "").trim();
-  const phone = String(rawMaster?.phone || "").trim();
-  const vehiclePlate = normalizePlate(rawMaster?.vehiclePlate);
-  const vehicleModel = String(rawMaster?.vehicleModel || "").trim();
-  const masterId = String(rawMaster?.id || "").trim();
-  const vehicleId = String(rawMaster?.vehicleId || "").trim();
-
-  if (!fullName || !vehiclePlate) {
-    return { error: "Usta ismi va mashina raqami kerak" };
-  }
-
-  let master = null;
-  if (masterId) {
-    master = await Master.findOne(tenantFilter(req, { _id: masterId }));
-  }
-
-  if (!master) {
-    master = await Master.findOne(tenantFilter(req, {
-      $or: [
-        { "vehicles.plateNumber": vehiclePlate },
-        { fullName, phone }
-      ]
-    }));
-  }
-
-  if (!master) {
-    master = await Master.create(withTenant(req, {
-      fullName,
-      phone,
-      vehicles: [{
-        plateNumber: vehiclePlate,
-        model: vehicleModel
-      }]
-    }));
-  } else {
-    if (phone && !master.phone) {
-      master.phone = phone;
-    }
-    if (fullName && master.fullName !== fullName) {
-      master.fullName = fullName;
-    }
-  }
-
-  let vehicle = null;
-  if (vehicleId) {
-    vehicle = master.vehicles.id(vehicleId);
-  }
-  if (!vehicle) {
-    vehicle = master.vehicles.find((entry) => normalizePlate(entry.plateNumber) === vehiclePlate) || null;
-  }
-  if (!vehicle) {
-    master.vehicles.push({
-      plateNumber: vehiclePlate,
-      model: vehicleModel
-    });
-    vehicle = master.vehicles[master.vehicles.length - 1];
-  } else if (vehicleModel && !String(vehicle.model || "").trim()) {
-    vehicle.model = vehicleModel;
-  }
-
-  await master.save();
-  return {
-    master,
-    vehicle
-  };
-}
-
-function allocateByAvailability(total, available) {
-  const cash = Math.max(0, Number(available?.cash || 0));
-  const card = Math.max(0, Number(available?.card || 0));
-  const click = Math.max(0, Number(available?.click || 0));
-  const sources = [
-    { key: "cash", value: cash },
-    { key: "card", value: card },
-    { key: "click", value: click }
-  ].filter((s) => s.value > 0);
-
-  if (sources.length < 1) return { cash: 0, card: 0, click: 0 };
-
-  const totalAvailable = sources.reduce((sum, s) => sum + s.value, 0);
-  let rest = roundMoney(total);
-  const out = { cash: 0, card: 0, click: 0 };
-
-  for (let i = 0; i < sources.length; i += 1) {
-    const s = sources[i];
-    const piece = i === sources.length - 1
-      ? rest
-      : Math.min(roundMoney((s.value / totalAvailable) * total), rest);
-    out[s.key] = roundMoney(piece);
-    rest = roundMoney(rest - out[s.key]);
-  }
-
-  if (rest > 0) {
-    const last = sources[sources.length - 1].key;
-    out[last] = roundMoney(out[last] + rest);
-  }
-  return out;
-}
-
-function buildDateRangeQuery({ period, from, to }) {
-  const query = {};
-  const now = new Date();
-
-  if (period === "today") {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const end = new Date(start);
-    end.setDate(end.getDate() + 1);
-    query.$gte = start;
-    query.$lt = end;
-  } else if (period === "yesterday") {
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const start = new Date(end);
-    start.setDate(start.getDate() - 1);
-    query.$gte = start;
-    query.$lt = end;
-  } else if (period === "7d") {
-    const start = new Date();
-    start.setDate(start.getDate() - 7);
-    query.$gte = start;
-  } else if (period === "30d") {
-    const start = new Date();
-    start.setDate(start.getDate() - 30);
-    query.$gte = start;
-  } else if (from || to) {
-    if (from) {
-      const start = new Date(from);
-      if (!Number.isNaN(start.getTime())) query.$gte = start;
-    }
-    if (to) {
-      const end = new Date(to);
-      if (!Number.isNaN(end.getTime())) {
-        end.setHours(23, 59, 59, 999);
-        query.$lte = end;
-      }
-    }
-  }
-
-  if (!query.$gte && !query.$lte && !query.$lt) return null;
-  return query;
-}
-
-router.get("/", authMiddleware, async (req, res) => {
-  const limitRaw = Number(req.query?.limit);
-  const limit = Number.isFinite(limitRaw) && limitRaw > 0
-    ? Math.min(Math.floor(limitRaw), 300)
-    : 100;
-
-  const period = String(req.query?.period || "").toLowerCase();
-  const from = String(req.query?.from || "");
-  const to = String(req.query?.to || "");
-  const query = tenantFilter(req, { entryType: { $ne: "opening_balance" } });
-  const createdAtRange = buildDateRangeQuery({ period, from, to });
-  if (createdAtRange) {
-    query.createdAt = createdAtRange;
-  }
-
-  const paymentQuery = tenantFilter(req);
-  if (createdAtRange) {
-    paymentQuery.paidAt = createdAtRange;
-  }
-
-  const [saleDocs, paymentDocs] = await Promise.all([
-    Sale.find(query)
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean(),
-    CustomerPayment.find(paymentQuery)
-      .populate("customerId", "fullName phone")
-      .sort({ paidAt: -1 })
-      .limit(limit)
-      .lean()
-  ]);
-
-  const saleEntries = saleDocs.map((sale) => ({
-    ...sale,
-    transactionType: "sale"
-  }));
-
-  const paymentEntries = paymentDocs.map((payment) => ({
-    _id: `payment-${String(payment._id)}`,
-    transactionType: "debt_payment",
-    createdAt: payment.paidAt || payment.createdAt,
-    cashierUsername: payment.cashierUsername || "-",
-    paymentType: "debt_payment",
-    payments: {
-      cash: roundMoney(Number(payment.amount || 0)),
-      card: 0,
-      click: 0
-    },
-    totalAmount: roundMoney(Number(payment.amount || 0)),
-    debtAmount: 0,
-    returnedAmount: 0,
-    customerId: payment.customerId?._id || null,
-    customerName: payment.customerId?.fullName || "",
-    customerPhone: payment.customerId?.phone || "",
-    note: payment.note || "",
-    items: []
-  }));
-
-  const sales = [...saleEntries, ...paymentEntries]
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, limit);
-
-  const summary = sales.reduce((acc, sale) => {
-    const txType = String(sale.transactionType || "sale");
-    const total = Number(sale.totalAmount || 0);
-    const cash = Number(sale.payments?.cash || 0);
-    const card = Number(sale.payments?.card || 0);
-    const click = Number(sale.payments?.click || 0);
-    const profit = txType === "debt_payment"
-      ? 0
-      : (sale.items || []).reduce(
-        (s, it) => s + (Number(it.lineProfit || 0) - Number(it.returnedProfit || 0)),
-        0
-      );
-    const expense = txType === "debt_payment"
-      ? 0
-      : Math.max(0, total - profit);
-    return {
-      totalTransactions: acc.totalTransactions + 1,
-      totalSales: acc.totalSales + (txType === "debt_payment" ? 0 : 1),
-      totalDebtPaymentCount: acc.totalDebtPaymentCount + (txType === "debt_payment" ? 1 : 0),
-      totalRevenue: roundMoney(acc.totalRevenue + (txType === "debt_payment" ? 0 : total)),
-      totalDebtPayment: roundMoney(acc.totalDebtPayment + (txType === "debt_payment" ? total : 0)),
-      totalCollection: roundMoney(acc.totalCollection + cash + card + click),
-      totalCash: roundMoney(acc.totalCash + cash),
-      totalCard: roundMoney(acc.totalCard + card),
-      totalClick: roundMoney(acc.totalClick + click),
-      totalProfit: roundMoney(acc.totalProfit + profit),
-      totalExpense: roundMoney(acc.totalExpense + expense)
-    };
-  }, {
-    totalTransactions: 0,
-    totalSales: 0,
-    totalDebtPaymentCount: 0,
-    totalRevenue: 0,
-    totalDebtPayment: 0,
-    totalCollection: 0,
-    totalCash: 0,
-    totalCard: 0,
-    totalClick: 0,
-    totalProfit: 0,
-    totalExpense: 0
-  });
-
-  return res.json({ sales, summary });
-});
-
-router.get("/returns", authMiddleware, async (req, res) => {
-  const limitRaw = Number(req.query?.limit);
-  const limit = Number.isFinite(limitRaw) && limitRaw > 0
-    ? Math.min(Math.floor(limitRaw), 500)
-    : 200;
-
-  const period = String(req.query?.period || "").toLowerCase();
-  const from = String(req.query?.from || "");
-  const to = String(req.query?.to || "");
-  const returnCreatedAtRange = buildDateRangeQuery({ period, from, to });
-
-  const pipeline = [
-    { $match: tenantFilter(req, { returns: { $exists: true, $ne: [] } }) },
-    { $unwind: "$returns" }
-  ];
-
-  if (returnCreatedAtRange) {
-    pipeline.push({ $match: { "returns.createdAt": returnCreatedAtRange } });
-  }
-
-  pipeline.push(
-    {
-      $project: {
-        _id: "$returns._id",
-        saleId: "$_id",
-        saleCreatedAt: "$createdAt",
-        returnCreatedAt: "$returns.createdAt",
-        cashierUsername: "$returns.cashierUsername",
-        paymentType: "$returns.paymentType",
-        payments: "$returns.payments",
-        totalAmount: "$returns.totalAmount",
-        note: "$returns.note",
-        items: "$returns.items"
-      }
-    },
-    { $sort: { returnCreatedAt: -1 } },
-    { $limit: limit }
-  );
-
-  const returns = await Sale.aggregate(pipeline);
-
-  const summary = returns.reduce((acc, ret) => {
-    const qty = (ret.items || []).reduce((sum, it) => sum + Number(it.quantity || 0), 0);
-    return {
-      totalReturns: acc.totalReturns + 1,
-      totalReturnedAmount: roundMoney(acc.totalReturnedAmount + Number(ret.totalAmount || 0)),
-      totalReturnedCash: roundMoney(acc.totalReturnedCash + Number(ret.payments?.cash || 0)),
-      totalReturnedCard: roundMoney(acc.totalReturnedCard + Number(ret.payments?.card || 0)),
-      totalReturnedClick: roundMoney(acc.totalReturnedClick + Number(ret.payments?.click || 0)),
-      totalReturnedQty: roundMoney(acc.totalReturnedQty + qty)
-    };
-  }, {
-    totalReturns: 0,
-    totalReturnedAmount: 0,
-    totalReturnedCash: 0,
-    totalReturnedCard: 0,
-    totalReturnedClick: 0,
-    totalReturnedQty: 0
-  });
-
-  return res.json({ returns, summary });
-});
-
-router.post("/", authMiddleware, async (req, res) => {
-  const items = normalizeItems(req.body?.items);
-  const paymentType = String(req.body?.paymentType || "").trim().toLowerCase();
-  const note = String(req.body?.note || "").trim();
-  const masterInput = req.body?.master || null;
-  const customerInput = {
-    fullName: String(req.body?.customer?.fullName || "").trim(),
-    phone: String(req.body?.customer?.phone || "").trim(),
-    address: String(req.body?.customer?.address || "").trim()
-  };
-
-  if (items.length < 1) {
-    return res.status(400).json({ message: "Sotuv uchun kamida 1 ta mahsulot kerak" });
-  }
-  if (!PAYMENT_TYPES.includes(paymentType)) {
-    return res.status(400).json({ message: "To'lov turi noto'g'ri" });
-  }
-
-  const productIds = items.map((it) => it.productId);
-  const products = await Product.find(tenantFilter(req, { _id: { $in: productIds } }))
-    .select("_id name model unit quantity retailPrice wholesalePrice purchasePrice")
-    .lean();
-
-  if (products.length !== items.length) {
-    return res.status(400).json({ message: "Ba'zi mahsulotlar topilmadi" });
-  }
-
-  const productMap = new Map(products.map((p) => [String(p._id), p]));
-  const saleItems = [];
-
-  for (const reqItem of items) {
-    const product = productMap.get(reqItem.productId);
-    if (!product) {
-      return res.status(400).json({ message: "Mahsulot topilmadi" });
-    }
-
-    const currentQty = Number(product.quantity) || 0;
-    if (reqItem.quantity > currentQty) {
-      return res.status(409).json({
-        message: `${product.name} uchun qoldiq yetarli emas (${currentQty})`
-      });
-    }
-
-    const defaultUnitPrice = reqItem.priceType === "wholesale"
-      ? Number(product.wholesalePrice || 0)
-      : Number(product.retailPrice || 0);
-    const unitPrice = Number.isFinite(reqItem.unitPrice) && reqItem.unitPrice >= 0
-      ? Number(reqItem.unitPrice)
-      : defaultUnitPrice;
-    const costPrice = Number(product.purchasePrice) || 0;
-    const lineTotal = roundMoney(unitPrice * reqItem.quantity);
-    const lineProfit = roundMoney((unitPrice - costPrice) * reqItem.quantity);
-    saleItems.push({
-      productId: product._id,
-      productName: product.name,
-      productModel: product.model || "",
-      unit: product.unit,
-      priceType: reqItem.priceType === "wholesale" ? "wholesale" : "retail",
-      quantity: reqItem.quantity,
-      unitPrice,
-      lineTotal,
-      costPrice,
-      lineProfit
-    });
-  }
-
->>>>>>> b87c25050512a2ade573d01e46a21ed576558824
   const totalAmount = roundMoney(saleItems.reduce((sum, it) => sum + it.lineTotal, 0));
   const payments = normalizePayments(req.body?.payments);
   let customer = null;
   let masterSale = null;
+  const activeShift = await Shift.findOne(
+    tenantFilter(req, { cashierId: req.user.id, status: "open" })
+  ).sort({ openedAt: -1 });
+
+  if (req.user?.role === "cashier" && !activeShift) {
+    return res.status(409).json({ message: "Avval smenani boshlang" });
+  }
 
   if (masterInput?.fullName || masterInput?.vehiclePlate) {
     masterSale = await resolveMasterSale(req, masterInput);
@@ -1084,7 +709,6 @@ router.post("/", authMiddleware, async (req, res) => {
       return res.status(400).json({ message: masterSale.error });
     }
   }
-<<<<<<< HEAD
 
   if (paymentType === "cash") {
     payments.cash = totalAmount;
@@ -1132,22 +756,23 @@ router.post("/", authMiddleware, async (req, res) => {
 
   const applied = [];
   for (const item of saleItems) {
+    const requiredBaseQty = roundQty(Number(item.baseQuantity || item.quantity || 0));
     const updateQuery = item.variantSize && item.variantColor
       ? tenantFilter(req, {
         _id: item.productId,
-        quantity: { $gte: item.quantity },
+        quantity: { $gte: requiredBaseQty },
         variantStocks: {
           $elemMatch: {
             size: item.variantSize,
             color: item.variantColor,
-            quantity: { $gte: item.quantity }
+            quantity: { $gte: requiredBaseQty }
           }
         }
       })
-      : tenantFilter(req, { _id: item.productId, quantity: { $gte: item.quantity } });
+      : tenantFilter(req, { _id: item.productId, quantity: { $gte: requiredBaseQty } });
     const updateBody = item.variantSize && item.variantColor
-      ? { $inc: { quantity: -item.quantity, "variantStocks.$.quantity": -item.quantity } }
-      : { $inc: { quantity: -item.quantity } };
+      ? { $inc: { quantity: -requiredBaseQty, "variantStocks.$.quantity": -requiredBaseQty } }
+      : { $inc: { quantity: -requiredBaseQty } };
     const updated = await Product.updateOne(updateQuery, updateBody);
 
     if (updated.modifiedCount !== 1) {
@@ -1158,12 +783,12 @@ router.post("/", authMiddleware, async (req, res) => {
               _id: rollback.productId,
               variantStocks: { $elemMatch: { size: rollback.variantSize, color: rollback.variantColor } }
             }),
-            { $inc: { quantity: rollback.quantity, "variantStocks.$.quantity": rollback.quantity } }
+            { $inc: { quantity: rollback.baseQuantity, "variantStocks.$.quantity": rollback.baseQuantity } }
           );
         } else {
           await Product.updateOne(
             tenantFilter(req, { _id: rollback.productId }),
-            { $inc: { quantity: rollback.quantity } }
+            { $inc: { quantity: rollback.baseQuantity } }
           );
         }
       }
@@ -1172,12 +797,14 @@ router.post("/", authMiddleware, async (req, res) => {
     applied.push({
       productId: item.productId,
       quantity: item.quantity,
+      baseQuantity: requiredBaseQty,
       variantSize: item.variantSize || "",
       variantColor: item.variantColor || ""
     });
   }
 
   const sale = await Sale.create(withTenant(req, {
+    saleNumber: await getNextSaleNumber(req.user.tenantId),
     cashierId: req.user.id,
     cashierUsername: req.user.username,
     items: saleItems,
@@ -1185,77 +812,6 @@ router.post("/", authMiddleware, async (req, res) => {
     paymentType,
     payments,
     note,
-=======
-
-  if (paymentType === "cash") {
-    payments.cash = totalAmount;
-    payments.card = 0;
-    payments.click = 0;
-  } else if (paymentType === "card") {
-    payments.cash = 0;
-    payments.card = totalAmount;
-    payments.click = 0;
-  } else if (paymentType === "click") {
-    payments.cash = 0;
-    payments.card = 0;
-    payments.click = totalAmount;
-  } else if (paymentType === "debt") {
-    if (!masterSale) {
-      if (!customerInput.fullName || !customerInput.phone || !customerInput.address) {
-        return res.status(400).json({ message: "Qarzga sotuv uchun mijoz ismi, telefoni va manzili kerak" });
-      }
-
-      customer = await Customer.findOne(tenantFilter(req, { phone: customerInput.phone }));
-      if (!customer) {
-        customer = await Customer.create(withTenant(req, {
-          fullName: customerInput.fullName,
-          phone: customerInput.phone,
-          address: customerInput.address,
-          totalDebt: 0,
-          totalPaid: 0
-        }));
-      } else {
-        customer.fullName = customerInput.fullName;
-        customer.address = customerInput.address;
-        await customer.save();
-      }
-    }
-
-    payments.cash = 0;
-    payments.card = 0;
-    payments.click = 0;
-  } else {
-    const sum = roundMoney(payments.cash + payments.card + payments.click);
-    if (Math.abs(sum - totalAmount) > 0.01) {
-      return res.status(400).json({ message: "Aralash to'lov summasi jami summaga teng bo'lishi kerak" });
-    }
-  }
-
-  const applied = [];
-  for (const item of saleItems) {
-    const updated = await Product.updateOne(
-      tenantFilter(req, { _id: item.productId, quantity: { $gte: item.quantity } }),
-      { $inc: { quantity: -item.quantity } }
-    );
-
-    if (updated.modifiedCount !== 1) {
-      for (const rollback of applied) {
-        await Product.updateOne(tenantFilter(req, { _id: rollback.productId }), { $inc: { quantity: rollback.quantity } });
-      }
-      return res.status(409).json({ message: `${item.productName} qoldig'i yetarli emas` });
-    }
-    applied.push({ productId: item.productId, quantity: item.quantity });
-  }
-
-  const sale = await Sale.create(withTenant(req, {
-    cashierId: req.user.id,
-    cashierUsername: req.user.username,
-    items: saleItems,
-    totalAmount,
-    paymentType,
-    payments,
-    note,
->>>>>>> b87c25050512a2ade573d01e46a21ed576558824
     customerId: customer?._id || null,
     customerName: customer?.fullName || "",
     customerPhone: customer?.phone || "",
@@ -1266,9 +822,11 @@ router.post("/", authMiddleware, async (req, res) => {
     vehicleId: masterSale?.vehicle?._id || null,
     vehiclePlate: masterSale?.vehicle?.plateNumber || "",
     vehicleModel: masterSale?.vehicle?.model || "",
-    debtAmount: paymentType === "debt" ? totalAmount : 0
+    debtAmount: paymentType === "debt" ? totalAmount : 0,
+    shiftId: activeShift?._id || null,
+    shiftNumber: activeShift?.shiftNumber || null,
+    shiftOpenedAt: activeShift?.openedAt || null
   }));
-<<<<<<< HEAD
 
   if (activeShift) {
     const itemCount = saleItems.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
@@ -1302,28 +860,6 @@ router.post("/", authMiddleware, async (req, res) => {
   return res.status(201).json({ sale });
 });
 
-=======
-
-  if (customer) {
-    customer.totalDebt = roundMoney(Number(customer.totalDebt || 0) + totalAmount);
-    await customer.save();
-  }
-
-  if (masterSale?.master && masterSale?.vehicle) {
-    const vehicle = masterSale.master.vehicles.id(masterSale.vehicle._id);
-    if (vehicle) {
-      if (paymentType === "debt") {
-        vehicle.totalDebt = roundMoney(Number(vehicle.totalDebt || 0) + totalAmount);
-      }
-      vehicle.lastSaleAt = new Date();
-      await masterSale.master.save();
-    }
-  }
-
-  return res.status(201).json({ sale });
-});
-
->>>>>>> b87c25050512a2ade573d01e46a21ed576558824
 router.post("/:id/returns", authMiddleware, async (req, res) => {
   const sale = await Sale.findOne(tenantFilter(req, { _id: req.params.id }));
   if (!sale) return res.status(404).json({ message: "Sotuv topilmadi" });
@@ -1380,13 +916,14 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
     returnItems.push({
       productId: saleItem.productId,
       productName: saleItem.productName,
+      barcode: saleItem.barcode || "",
+      productCode: normalizeProductCode(saleItem.productCode, saleItem.barcode),
       unit: saleItem.unit,
-<<<<<<< HEAD
       variantSize: requestedVariantSize,
       variantColor: requestedVariantColor,
-=======
->>>>>>> b87c25050512a2ade573d01e46a21ed576558824
       quantity: roundMoney(item.quantity),
+      stockPerUnitInBase: Number(saleItem.stockPerUnitInBase || 1),
+      baseQuantity: roundQty(Number(item.quantity || 0) * Number(saleItem.stockPerUnitInBase || 1)),
       unitPrice,
       lineTotal,
       lineProfit
@@ -1431,17 +968,18 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
 
   const updatedStock = [];
   for (const item of returnItems) {
+    const baseQty = roundQty(Number(item.baseQuantity || item.quantity || 0));
     const changed = item.variantSize && item.variantColor
       ? await Product.updateOne(
         tenantFilter(req, {
           _id: item.productId,
           variantStocks: { $elemMatch: { size: item.variantSize, color: item.variantColor } }
         }),
-        { $inc: { quantity: item.quantity, "variantStocks.$.quantity": item.quantity } }
+        { $inc: { quantity: baseQty, "variantStocks.$.quantity": baseQty } }
       )
       : await Product.updateOne(
         tenantFilter(req, { _id: item.productId }),
-        { $inc: { quantity: item.quantity } }
+        { $inc: { quantity: baseQty } }
       );
     if (changed.matchedCount !== 1) {
       for (const rollback of updatedStock) {
@@ -1451,12 +989,12 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
               _id: rollback.productId,
               variantStocks: { $elemMatch: { size: rollback.variantSize, color: rollback.variantColor } }
             }),
-            { $inc: { quantity: -rollback.quantity, "variantStocks.$.quantity": -rollback.quantity } }
+            { $inc: { quantity: -rollback.baseQuantity, "variantStocks.$.quantity": -rollback.baseQuantity } }
           );
         } else {
           await Product.updateOne(
             tenantFilter(req, { _id: rollback.productId }),
-            { $inc: { quantity: -rollback.quantity } }
+            { $inc: { quantity: -rollback.baseQuantity } }
           );
         }
       }
@@ -1465,13 +1003,13 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
     updatedStock.push({
       productId: item.productId,
       quantity: item.quantity,
+      baseQuantity: baseQty,
       variantSize: item.variantSize || "",
       variantColor: item.variantColor || ""
     });
   }
 
   for (const item of returnItems) {
-<<<<<<< HEAD
     let remainingQty = roundMoney(item.quantity);
     let targetRows = sale.items.filter((target) => {
       if (String(target.productId) !== String(item.productId)) return false;
@@ -1484,20 +1022,6 @@ router.post("/:id/returns", authMiddleware, async (req, res) => {
         return !String(target.variantSize || "").trim() && !String(target.variantColor || "").trim();
       });
     }
-=======
-    const changed = await Product.updateOne(
-      tenantFilter(req, { _id: item.productId }),
-      { $inc: { quantity: item.quantity } }
-    );
-    if (changed.matchedCount !== 1) {
-      for (const rollback of updatedStock) {
-        await Product.updateOne(tenantFilter(req, { _id: rollback.productId }), { $inc: { quantity: -rollback.quantity } });
-      }
-      return res.status(409).json({ message: `${item.productName} omborda topilmadi` });
-    }
-    updatedStock.push({ productId: item.productId, quantity: item.quantity });
-  }
->>>>>>> b87c25050512a2ade573d01e46a21ed576558824
 
     for (const target of targetRows) {
       if (remainingQty <= 0.0001) break;

@@ -379,10 +379,11 @@ export async function initDb() {
     });
   }
 
-  const hasSettings = await AppSettings.exists({ tenantId: defaultTenant._id });
-  if (!hasSettings) {
-    await AppSettings.create({ tenantId: defaultTenant._id });
-  }
+  await AppSettings.updateOne(
+    { tenantId: defaultTenant._id },
+    { $setOnInsert: { tenantId: defaultTenant._id } },
+    { upsert: true }
+  );
 
   const categoryCount = await Category.countDocuments({ tenantId: defaultTenant._id });
   if (categoryCount === 0) {

@@ -156,6 +156,9 @@ router.put("/", authMiddleware, requireAdmin, async (req, res) => {
 =======
   const title = String(req.body?.receipt?.title || "").trim();
   const footer = String(req.body?.receipt?.footer || "").trim();
+  const phoneNumber = String(req.body?.receipt?.phoneNumber || "").trim();
+  const legalText = String(req.body?.receipt?.legalText || "").trim();
+  const contactLine = String(req.body?.receipt?.contactLine || "").trim();
   const logoUrl = String(req.body?.receipt?.logoUrl || "").trim();
   const fieldsRaw = req.body?.receipt?.fields || {};
 
@@ -217,9 +220,18 @@ export default router;
   settings.receipt = {
     title: title || "CHEK",
     footer: footer || "Xaridingiz uchun rahmat!",
+    phoneNumber,
+    legalText,
+    contactLine,
     logoUrl,
     fields: {
+      showLogo: fieldsRaw.showLogo !== false,
+      showTitle: fieldsRaw.showTitle !== false,
+      showReceiptNumber: fieldsRaw.showReceiptNumber !== false,
       showDate: fieldsRaw.showDate !== false,
+      showTime: fieldsRaw.showTime !== false,
+      showType: fieldsRaw.showType === true,
+      showShift: fieldsRaw.showShift !== false,
       showCashier: fieldsRaw.showCashier !== false,
       showPaymentType: fieldsRaw.showPaymentType !== false,
       showCustomer: fieldsRaw.showCustomer !== false,
@@ -227,7 +239,10 @@ export default router;
       showItemUnitPrice: fieldsRaw.showItemUnitPrice !== false,
       showItemLineTotal: fieldsRaw.showItemLineTotal !== false,
       showTotal: fieldsRaw.showTotal !== false,
-      showFooter: fieldsRaw.showFooter !== false
+      showFooter: fieldsRaw.showFooter !== false,
+      showLegalText: fieldsRaw.showLegalText !== false,
+      showPhoneNumber: fieldsRaw.showPhoneNumber !== false,
+      showContactLine: fieldsRaw.showContactLine === true
     }
   };
   await settings.save();

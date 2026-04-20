@@ -43,10 +43,33 @@ function normalizeBarcode(value) {
   return String(value || "").replace(/\s+/g, "").trim();
 }
 
+function normalizeBarcodeAliases(values, primaryBarcode = "") {
+  const primary = normalizeBarcode(primaryBarcode);
+  const raw = Array.isArray(values)
+    ? values
+    : (values ? [values] : []);
+
+  const seen = new Set();
+  const aliases = [];
+  for (const item of raw) {
+    const normalized = normalizeBarcode(item);
+    if (!normalized) continue;
+    if (normalized === primary) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    aliases.push(normalized);
+  }
+  return aliases;
+}
+
 function generateBarcodeCandidate() {
   const base = String(Date.now()).slice(-10);
   const suffix = String(Math.floor(100 + Math.random() * 900));
   return `${base}${suffix}`;
+}
+
+function normalizeProductCode(value) {
+  return String(value || "").replace(/\D+/g, "").slice(-4).padStart(4, "0");
 }
 
 async function ensureUniqueBarcode(tenantId, barcode, excludeId = null) {
@@ -78,6 +101,84 @@ async function ensureUniqueBarcode(tenantId, barcode, excludeId = null) {
   return { error: "Shtixkod yaratib bo'lmadi, qayta urinib ko'ring" };
 }
 
+async function ensureUniqueBarcodeSet(tenantId, barcode, barcodeAliases = [], excludeId = null) {
+  let primary = normalizeBarcode(barcode);
+  let aliases = normalizeBarcodeAliases(barcodeAliases, primary);
+
+  if (!primary) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const candidate = generateBarcodeCandidate();
+      const exists = await Product.exists({
+        tenantId,
+        $or: [
+          { barcode: candidate },
+          { barcodeAliases: candidate }
+        ],
+        ...(excludeId ? { _id: { $ne: excludeId } } : {})
+      });
+      if (!exists) {
+        primary = candidate;
+        break;
+      }
+    }
+    if (!primary) {
+      return { error: "Shtixkod yaratib bo'lmadi, qayta urinib ko'ring" };
+    }
+    aliases = normalizeBarcodeAliases(aliases, primary);
+  }
+
+  const allCodes = [primary, ...aliases];
+  const duplicate = await Product.findOne({
+    tenantId,
+    $or: [
+      { barcode: { $in: allCodes } },
+      { barcodeAliases: { $in: allCodes } }
+    ],
+    ...(excludeId ? { _id: { $ne: excludeId } } : {})
+  })
+    .select("_id")
+    .lean();
+
+  if (duplicate) {
+    return { error: "Shtixkodlardan biri allaqachon mavjud" };
+  }
+
+  return {
+    barcode: primary,
+    barcodeAliases: aliases
+  };
+}
+
+async function ensureUniqueProductCode(tenantId, productCode = "", excludeId = null) {
+  const normalized = normalizeProductCode(productCode);
+  if (normalized && normalized !== "0000") {
+    const duplicate = await Product.exists({
+      tenantId,
+      productCode: normalized,
+      ...(excludeId ? { _id: { $ne: excludeId } } : {})
+    });
+    if (duplicate) {
+      return { error: "Bu mahsulot kodi allaqachon mavjud" };
+    }
+    return { productCode: normalized };
+  }
+
+  const total = await Product.countDocuments({ tenantId });
+  for (let offset = 1; offset < 10000; offset += 1) {
+    const candidate = String(total + offset).slice(-4).padStart(4, "0");
+    const exists = await Product.exists({
+      tenantId,
+      productCode: candidate,
+      ...(excludeId ? { _id: { $ne: excludeId } } : {})
+    });
+    if (!exists) {
+      return { productCode: candidate };
+    }
+  }
+
+  return { error: "Mahsulot kodi yaratib bo'lmadi" };
+}
+
 async function getUsdRate(tenantId) {
   const settings = await AppSettings.findOne({ tenantId }).lean();
   const rate = Number(settings?.usdRate || 0);
@@ -89,6 +190,12 @@ function convertToUzs(value, priceCurrency, usdRate) {
   if (!Number.isFinite(numeric)) return NaN;
   if (priceCurrency === "usd") return roundMoney(numeric * usdRate);
   return roundMoney(numeric);
+}
+
+function normalizeOptionalPositiveNumber(value, fallback = 0) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return numeric;
 }
 
 function normalizeStringArray(value) {
@@ -195,7 +302,13 @@ async function fetchCentralProductByBarcode(token, barcode) {
   );
   const data = await readJsonOrThrow(response);
   const products = Array.isArray(data?.products) ? data.products : [];
-  return products.find((item) => String(item?.barcode || "").trim() === barcode) || null;
+  return products.find((item) => {
+    const primary = String(item?.barcode || "").trim();
+    const aliases = Array.isArray(item?.barcodeAliases)
+      ? item.barcodeAliases.map((alias) => String(alias || "").trim())
+      : [];
+    return primary === barcode || aliases.includes(barcode);
+  }) || null;
 }
 
 async function ensureCategoryByName(req, categoryName) {
@@ -248,6 +361,7 @@ function parsePayload(body, usdRate) {
     name: String(body?.name || "").trim(),
     model: String(body?.model || "").trim(),
     barcode: normalizeBarcode(body?.barcode),
+    barcodeAliases: normalizeBarcodeAliases(body?.barcodeAliases, body?.barcode),
     categoryId: String(body?.categoryId || "").trim(),
     supplierId: String(body?.supplierId || "").trim(),
     purchasePrice,
@@ -267,8 +381,11 @@ function parsePayload(body, usdRate) {
     variantStocks,
     allowPieceSale: supportsPieceSale(unit) ? allowPieceSale : false,
     pieceUnit: String(body?.pieceUnit || (unit === "pachka" ? "dona" : "kg")).trim().toLowerCase(),
-    pieceQtyPerBase: Number(body?.pieceQtyPerBase),
-    piecePrice: convertToUzs(body?.piecePrice, priceCurrency, usdRate)
+    pieceQtyPerBase: normalizeOptionalPositiveNumber(body?.pieceQtyPerBase, 0),
+    piecePrice: normalizeOptionalPositiveNumber(
+      convertToUzs(body?.piecePrice, priceCurrency, usdRate),
+      0
+    )
   };
 }
 
@@ -323,6 +440,7 @@ router.get("/", authMiddleware, async (req, res) => {
     const normalized = normalizeBarcode(search);
     query.$or = [
       { barcode: normalized },
+      { barcodeAliases: normalized },
       { name: { $regex: search, $options: "i" } },
       { model: { $regex: search, $options: "i" } }
     ];
@@ -393,11 +511,13 @@ router.put("/top", authMiddleware, async (req, res) => {
 });
 
 router.post("/sync-central", authMiddleware, async (req, res) => {
-  const storeCode = String(req.body?.storeCode || getDefaultStoreCode()).trim();
-  const storeName = String(req.body?.storeName || getDefaultStoreName()).trim().toLowerCase();
-  if (!storeCode && !storeName) {
-    return res.status(400).json({ message: "Do'kon kodi yoki nomi kiritilmagan" });
-  }
+  try {
+  const storeCode = String(
+    req.body?.storeCode || getDefaultStoreCode() || "7909"
+  ).trim();
+  const storeName = String(
+    req.body?.storeName || getDefaultStoreName() || "ataway"
+  ).trim().toLowerCase();
 
   const centralToken = await getCentralToken();
   const transfers = await fetchCentralTransfers(centralToken);
@@ -511,10 +631,19 @@ router.post("/sync-central", authMiddleware, async (req, res) => {
       );
 
       if (!product) {
+        const productCodeResult = await ensureUniqueProductCode(req.user.tenantId);
         product = await Product.create(withTenant(req, {
           name: String(remoteProduct?.name || rawItem?.name || "Transfer mahsulot").trim(),
           model: String(remoteProduct?.model || rawItem?.model || "-").trim(),
           barcode: barcode || generateBarcodeCandidate(),
+          barcodeAliases: normalizeBarcodeAliases(
+            [
+              remoteProduct?.barcode,
+              ...(Array.isArray(remoteProduct?.barcodeAliases) ? remoteProduct.barcodeAliases : [])
+            ],
+            barcode
+          ),
+          productCode: productCodeResult.productCode,
           categoryId: category._id,
           supplierId: supplier._id,
           purchasePrice,
@@ -538,8 +667,30 @@ router.post("/sync-central", authMiddleware, async (req, res) => {
           piecePrice: Number(remoteProduct?.piecePrice || 0)
         }));
       } else {
+        if (!String(product.productCode || "").trim()) {
+          const productCodeResult = await ensureUniqueProductCode(
+            req.user.tenantId,
+            "",
+            product._id
+          );
+          product.productCode = productCodeResult.productCode;
+        }
         product.name = String(remoteProduct?.name || rawItem?.name || product.name).trim();
         product.model = String(remoteProduct?.model || rawItem?.model || product.model).trim();
+        const remoteAliases = normalizeBarcodeAliases(
+          [
+            remoteProduct?.barcode,
+            ...(Array.isArray(remoteProduct?.barcodeAliases) ? remoteProduct.barcodeAliases : [])
+          ],
+          product.barcode
+        );
+        if (remoteAliases.length > 0) {
+          const existingAliases = normalizeBarcodeAliases(product.barcodeAliases, product.barcode);
+          product.barcodeAliases = normalizeBarcodeAliases(
+            [...existingAliases, ...remoteAliases],
+            product.barcode
+          );
+        }
         product.categoryId = category._id;
         product.supplierId = supplier._id;
         product.purchasePrice = purchasePrice;
@@ -615,6 +766,12 @@ router.post("/sync-central", authMiddleware, async (req, res) => {
     skippedTransfers: storeTransfers.length - pendingTransfers.length,
     message: `${syncedTransfers} ta transfer sinxron qilindi`
   });
+  } catch (error) {
+    console.error("sync-central error:", error);
+    return res.status(502).json({
+      message: error?.message || "Markaziy server bilan sinxron xatoligi"
+    });
+  }
 });
 
 router.post("/", authMiddleware, async (req, res) => {
@@ -622,9 +779,17 @@ router.post("/", authMiddleware, async (req, res) => {
   const payload = parsePayload(req.body, usdRate);
   const invalid = validatePayload(payload);
   if (invalid) return res.status(400).json({ message: invalid });
-  const barcodeResult = await ensureUniqueBarcode(req.user.tenantId, payload.barcode);
+  const barcodeResult = await ensureUniqueBarcodeSet(
+    req.user.tenantId,
+    payload.barcode,
+    payload.barcodeAliases
+  );
   if (barcodeResult.error) return res.status(409).json({ message: barcodeResult.error });
   payload.barcode = barcodeResult.barcode;
+  payload.barcodeAliases = barcodeResult.barcodeAliases;
+  const productCodeResult = await ensureUniqueProductCode(req.user.tenantId, req.body?.productCode);
+  if (productCodeResult.error) return res.status(409).json({ message: productCodeResult.error });
+  payload.productCode = productCodeResult.productCode;
 
   const categoryExists = await Category.exists(tenantFilter(req, { _id: payload.categoryId }));
   if (!categoryExists) return res.status(400).json({ message: "Kategoriya topilmadi" });
@@ -780,13 +945,24 @@ router.put("/:id", authMiddleware, async (req, res) => {
   const payload = parsePayload(req.body, usdRate);
   const invalid = validatePayload(payload);
   if (invalid) return res.status(400).json({ message: invalid });
-  const barcodeResult = await ensureUniqueBarcode(
+  const barcodeResult = await ensureUniqueBarcodeSet(
     req.user.tenantId,
     payload.barcode,
+    payload.barcodeAliases,
     req.params.id
   );
   if (barcodeResult.error) return res.status(409).json({ message: barcodeResult.error });
   payload.barcode = barcodeResult.barcode;
+  payload.barcodeAliases = barcodeResult.barcodeAliases;
+  const currentProduct = await Product.findOne(tenantFilter(req, { _id: req.params.id })).select("productCode");
+  if (!currentProduct) return res.status(404).json({ message: "Mahsulot topilmadi" });
+  const productCodeResult = await ensureUniqueProductCode(
+    req.user.tenantId,
+    req.body?.productCode || currentProduct.productCode,
+    req.params.id
+  );
+  if (productCodeResult.error) return res.status(409).json({ message: productCodeResult.error });
+  payload.productCode = productCodeResult.productCode;
 
   const categoryExists = await Category.exists(tenantFilter(req, { _id: payload.categoryId }));
   if (!categoryExists) return res.status(400).json({ message: "Kategoriya topilmadi" });

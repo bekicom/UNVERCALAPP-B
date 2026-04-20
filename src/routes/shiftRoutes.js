@@ -10,6 +10,13 @@ function roundMoney(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
+function getLocalDayRange(date = new Date()) {
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
+
 function buildDateRangeQuery({ period, from, to }) {
   const query = {};
   const now = new Date();
@@ -111,8 +118,24 @@ router.post("/open", authMiddleware, async (req, res) => {
     return res.json({ shift: existing });
   }
 
-  const shiftNumber =
-    (await Shift.countDocuments(tenantFilter(req))) + 1;
+  const { start, end } = getLocalDayRange();
+  const todaysShiftCount = await Shift.countDocuments(
+    tenantFilter(req, {
+      cashierId: req.user.id,
+      openedAt: {
+        $gte: start,
+        $lt: end
+      }
+    })
+  );
+
+  if (todaysShiftCount >= 2) {
+    return res.status(409).json({
+      message: "Bu kassada bugun faqat 2 ta smena ochish mumkin"
+    });
+  }
+
+  const shiftNumber = todaysShiftCount + 1;
 
   const shift = await Shift.create(
     withTenant(req, {
