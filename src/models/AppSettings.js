@@ -8,6 +8,13 @@ const appSettingsSchema = new mongoose.Schema(
     displayCurrency: { type: String, enum: ["uzs", "usd"], required: true, default: "uzs" },
     keyboardEnabled: { type: Boolean, required: true, default: true },
     ustalarEnabled: { type: Boolean, required: true, default: false },
+    topProductIds: {
+      type: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Product"
+      }],
+      default: []
+    },
     receipt: {
       title: { type: String, trim: true, default: "CHEK" },
       footer: { type: String, trim: true, default: "Xaridingiz uchun rahmat!" },

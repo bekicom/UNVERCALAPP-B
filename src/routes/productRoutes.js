@@ -95,6 +95,17 @@ function validatePayload(payload) {
   return null;
 }
 
+async function getOrCreateProductSettings(tenantId) {
+  let settings = await AppSettings.findOne({ tenantId });
+  if (!settings) {
+    settings = await AppSettings.create({ tenantId, topProductIds: [] });
+  } else if (!Array.isArray(settings.topProductIds)) {
+    settings.topProductIds = [];
+    await settings.save();
+  }
+  return settings;
+}
+
 router.get("/", authMiddleware, async (req, res) => {
   const query = tenantFilter(req);
   if (req.query.categoryId) {
@@ -107,6 +118,62 @@ router.get("/", authMiddleware, async (req, res) => {
     .sort({ createdAt: -1 })
     .lean();
   res.json({ products });
+});
+
+router.get("/top", authMiddleware, async (req, res) => {
+  const settings = await getOrCreateProductSettings(req.user.tenantId);
+  const ids = (settings.topProductIds || []).map((item) => String(item));
+  if (!ids.length) {
+    return res.json({ products: [] });
+  }
+
+  const products = await Product.find(tenantFilter(req, { _id: { $in: ids } }))
+    .populate({ path: "categoryId", select: "name" })
+    .populate({ path: "supplierId", select: "name phone address" })
+    .lean();
+
+  const ordered = ids
+    .map((id) => products.find((product) => String(product._id) === id))
+    .filter(Boolean);
+
+  res.json({ products: ordered });
+});
+
+router.put("/top", authMiddleware, async (req, res) => {
+  const productIdsRaw = Array.isArray(req.body?.productIds)
+    ? req.body.productIds
+    : [];
+  const productIds = [
+    ...new Set(
+      productIdsRaw
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    )
+  ].slice(0, 24);
+
+  if (productIds.length) {
+    const matchedProducts = await Product.countDocuments(
+      tenantFilter(req, { _id: { $in: productIds } })
+    );
+    if (matchedProducts !== productIds.length) {
+      return res.status(400).json({ message: "TOP mahsulotlardan biri topilmadi" });
+    }
+  }
+
+  const settings = await getOrCreateProductSettings(req.user.tenantId);
+  settings.topProductIds = productIds;
+  await settings.save();
+
+  const products = await Product.find(tenantFilter(req, { _id: { $in: productIds } }))
+    .populate({ path: "categoryId", select: "name" })
+    .populate({ path: "supplierId", select: "name phone address" })
+    .lean();
+
+  const ordered = productIds
+    .map((id) => products.find((product) => String(product._id) === id))
+    .filter(Boolean);
+
+  res.json({ products: ordered });
 });
 
 router.post("/", authMiddleware, async (req, res) => {

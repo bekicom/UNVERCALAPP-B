@@ -6,6 +6,46 @@ import { Tenant } from "../models/Tenant.js";
 
 const router = Router();
 
+router.get("/login-users", async (req, res) => {
+  try {
+    const tenantSlug = String(req.query?.tenantSlug || "")
+      .trim()
+      .toLowerCase();
+
+    let tenant = null;
+    if (tenantSlug) {
+      tenant = await Tenant.findOne({ slug: tenantSlug, isActive: true }).lean();
+      if (!tenant) {
+        return res.json({ users: [] });
+      }
+    }
+
+    const filter = tenant ? { tenantId: tenant._id } : {};
+    const users = await User.find(filter)
+      .select("username role createdAt")
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const seen = new Set();
+    const loginUsers = [];
+    for (const user of users) {
+      const username = String(user.username || "").trim();
+      if (!username) continue;
+      const key = username.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      loginUsers.push({
+        username,
+        role: String(user.role || "cashier"),
+      });
+    }
+
+    return res.json({ users: loginUsers });
+  } catch {
+    return res.status(500).json({ message: "Foydalanuvchilarni olishda xatolik" });
+  }
+});
+
 router.post("/login", async (req, res) => {
   const username = String(req.body?.username || "").trim();
   const password = String(req.body?.password || "");

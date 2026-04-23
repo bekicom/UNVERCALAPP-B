@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { authMiddleware } from "../authMiddleware.js";
 import { AppSettings } from "../models/AppSettings.js";
+import { openCashDrawer } from "../cashDrawer.js";
 
 const router = Router();
 
@@ -31,6 +32,11 @@ async function getOrCreateSettings(tenantId) {
 router.get("/", authMiddleware, async (req, res) => {
   const settings = await getOrCreateSettings(req.user.tenantId);
   res.json({ settings });
+});
+
+router.post("/cash-drawer/open", authMiddleware, async (_req, res) => {
+  const result = await openCashDrawer();
+  res.json(result);
 });
 
 router.put("/", authMiddleware, requireAdmin, async (req, res) => {
